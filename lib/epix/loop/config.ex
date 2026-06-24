@@ -15,7 +15,9 @@ defmodule Epix.Loop.Config do
             temperature: 0.2,
             max_tokens: 1024,
             max_steps: 8,
-            receive_timeout: 60_000
+            receive_timeout: 60_000,
+            context_window: 128_000,
+            compaction_threshold: 0.8
 
   @type t :: %__MODULE__{
           model: struct() | nil,
@@ -24,6 +26,8 @@ defmodule Epix.Loop.Config do
           temperature: number(),
           max_tokens: pos_integer(),
           max_steps: pos_integer(),
-          receive_timeout: pos_integer()
+          receive_timeout: pos_integer(),
+          context_window: pos_integer(),
+          compaction_threshold: float()
         }
 end

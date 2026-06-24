@@ -232,6 +232,19 @@ defmodule Epix.LoopTest do
       events = Agent.get(collector, &Enum.reverse/1)
       assert {:cancelled, %{step: 0}} in events
     end
+
+    test "a cancel that lands on the run-completing turn still cancels" do
+      abort = Abort.new()
+
+      # Simulate the cancel arriving while the final model call is in flight.
+      model = fn _ctx, _cfg, rctx ->
+        Abort.cancel(rctx.abort)
+        {:ok, %Turn{message: assistant_msg(), text: "final answer", finish_reason: :stop}}
+      end
+
+      {result, _final} = Runner.run(init_state(), model, fn _c, _r -> "" end, abort: abort)
+      assert result == {:error, :cancelled}
+    end
   end
 
   describe "steering and follow-up" do
@@ -285,6 +298,79 @@ defmodule Epix.LoopTest do
       assert result == {:ok, "second"}
       assert Enum.count(final.context.messages, &(&1.role == :user)) == 2
       assert {:follow_up, %{count: 1}} in Agent.get(collector, &Enum.reverse/1)
+    end
+  end
+
+  describe "compaction" do
+    defp msg_text(message) do
+      Enum.map_join(message.content, "", fn
+        %{text: text} when is_binary(text) -> text
+        _ -> ""
+      end)
+    end
+
+    defp big_state(opts) do
+      ctx = Context.new([Context.user(String.duplicate("x", 100))])
+      Loop.init(ctx, struct(%Config{}, opts))
+    end
+
+    test "proactive compaction replaces the context when over the threshold" do
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+
+      # ~25 estimated tokens of context, limit = 10 * 0.5 = 5 -> over threshold.
+      state = big_state(context_window: 10, compaction_threshold: 0.5)
+      compaction = fn _messages -> {:ok, [Context.user("SUMMARY")]} end
+      model = fn _ctx, _cfg, _rctx -> {:ok, %Turn{message: assistant_msg(), text: "ok"}} end
+
+      {result, final} =
+        Runner.run(state, model, fn _c, _r -> "" end, compaction: compaction, emit: emit)
+
+      assert result == {:ok, "ok"}
+      first_user = Enum.find(final.context.messages, &(&1.role == :user))
+      assert msg_text(first_user) == "SUMMARY"
+
+      assert Enum.any?(
+               Agent.get(collector, &Enum.reverse/1),
+               &match?({:compaction, %{reason: :threshold}}, &1)
+             )
+    end
+
+    test "a context-overflow error triggers compaction and one retry" do
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      model = fn _ctx, _cfg, _rctx ->
+        case Agent.get_and_update(calls, fn n -> {n, n + 1} end) do
+          0 -> {:error, :context_overflow}
+          _ -> {:ok, %Turn{message: assistant_msg(), text: "recovered", finish_reason: :stop}}
+        end
+      end
+
+      # A real compaction shrinks the context; big_state (~25 tok) -> ~0 tok.
+      compaction = fn _messages -> {:ok, [Context.user("s")]} end
+
+      {result, _final} =
+        Runner.run(big_state([]), model, fn _c, _r -> "" end, compaction: compaction, emit: emit)
+
+      assert result == {:ok, "recovered"}
+
+      assert Enum.any?(
+               Agent.get(collector, &Enum.reverse/1),
+               &match?({:compaction, %{reason: :overflow}}, &1)
+             )
+    end
+
+    test "an overflow that compaction cannot help surfaces as an error (no infinite retry)" do
+      model = fn _ctx, _cfg, _rctx -> {:error, :context_overflow} end
+      # compaction returns the messages unchanged -> compacted == state -> give up
+      compaction = fn messages -> {:ok, messages} end
+
+      {result, _final} =
+        Runner.run(init_state(), model, fn _c, _r -> "" end, compaction: compaction)
+
+      assert result == {:error, :context_overflow}
     end
   end
 end

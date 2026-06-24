@@ -78,7 +78,9 @@ defmodule Epix.Session do
       max_steps: opts[:max_steps] || 8,
       temperature: opts[:temperature] || 0.2,
       max_tokens: opts[:max_tokens] || 1024,
-      receive_timeout: opts[:receive_timeout] || 60_000
+      receive_timeout: opts[:receive_timeout] || 60_000,
+      context_window: opts[:context_window] || 128_000,
+      compaction_threshold: opts[:compaction_threshold] || 0.8
     }
   end
 
@@ -88,7 +90,10 @@ defmodule Epix.Session do
     loop_state = Loop.init(context, config)
 
     run_opts =
-      [verbose: state.verbose] ++ Keyword.take(opts, [:emit, :abort, :steering, :follow_up])
+      [
+        verbose: state.verbose,
+        compaction: Keyword.get(opts, :compaction, compaction_fun(config))
+      ] ++ Keyword.take(opts, [:emit, :abort, :steering, :follow_up])
 
     {result, final} =
       Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)
@@ -131,10 +136,14 @@ defmodule Epix.Session do
 
     {worker, ref} =
       spawn_monitor(fn ->
+        # Exit if the Session dies mid-call so the worker (and the provider
+        # processes linked to it) are not orphaned.
+        parent_ref = Process.monitor(parent)
         send(parent, {:model_done, self(), fun.()})
 
         receive do
           :stop -> :ok
+          {:DOWN, ^parent_ref, :process, ^parent, _reason} -> :ok
         after
           30_000 -> :ok
         end
@@ -143,6 +152,14 @@ defmodule Epix.Session do
     result = await_isolated(worker, ref, abort)
     Process.exit(worker, :kill)
     Process.demonitor(ref, [:flush])
+    # The worker may have sent its result in the cancel race window; drop it so it
+    # does not linger in the Session mailbox.
+    receive do
+      {:model_done, ^worker, _} -> :ok
+    after
+      0 -> :ok
+    end
+
     result
   end
 
@@ -165,23 +182,36 @@ defmodule Epix.Session do
   # The tap also checks the abort token per chunk: on cancellation it calls the
   # stream's own `cancel` for a graceful teardown (no killed-process log) and
   # throws past `to_response` (whose catch only handles `:exit`, not `:throw`).
+  # As a backstop that does not depend on that dep detail, the token is re-checked
+  # after `to_response` returns and any result is normalized to `:cancelled`.
   defp consume_stream(stream_response, rctx) do
     tapped =
       Stream.each(stream_response.stream, fn chunk ->
         if Abort.cancelled?(rctx.abort) do
-          stream_response.cancel.()
+          safe_cancel(stream_response)
           throw(:epix_cancelled)
         end
 
         emit_chunk(chunk, rctx.emit)
       end)
 
-    case StreamResponse.to_response(%{stream_response | stream: tapped}) do
-      {:ok, %Response{} = resp} -> {:ok, normalize(resp)}
-      {:error, reason} -> {:error, reason}
-    end
+    result =
+      case StreamResponse.to_response(%{stream_response | stream: tapped}) do
+        {:ok, %Response{} = resp} -> {:ok, normalize(resp)}
+        {:error, reason} -> {:error, reason}
+      end
+
+    if Abort.cancelled?(rctx.abort), do: {:error, :cancelled}, else: result
   catch
     :throw, :epix_cancelled -> {:error, :cancelled}
+  end
+
+  # The stream's cancel is a GenServer.call; if the server already stopped it
+  # raises an exit, which we swallow so cancellation still reports as cancelled.
+  defp safe_cancel(stream_response) do
+    stream_response.cancel.()
+  catch
+    :exit, _ -> :ok
   end
 
   defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text),
@@ -218,6 +248,71 @@ defmodule Epix.Session do
       end
     end
   end
+
+  # Compaction strategy: keep the system message and the current turn (from the
+  # last user message), summarizing the older complete turns into one message. The
+  # last-user boundary avoids splitting an assistant tool-call from its results.
+  defp compaction_fun(config) do
+    fn messages ->
+      {system, rest} = pop_system(messages)
+      compact_messages(messages, system, split_at_last_user(rest), config)
+    end
+  end
+
+  defp compact_messages(messages, _system, {[], _recent}, _config), do: {:ok, messages}
+
+  defp compact_messages(_messages, system, {old, recent}, config) do
+    case summarize(old, config) do
+      {:ok, text} ->
+        summary = Context.user("[Summary of earlier conversation]\n" <> text)
+        {:ok, system ++ [summary | recent]}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp pop_system([%{role: :system} = system | rest]), do: {[system], rest}
+  defp pop_system(messages), do: {[], messages}
+
+  defp split_at_last_user(messages) do
+    last_user =
+      messages
+      |> Enum.with_index()
+      |> Enum.filter(fn {message, _index} -> message.role == :user end)
+      |> List.last()
+
+    case last_user do
+      nil -> {messages, []}
+      {_message, index} -> Enum.split(messages, index)
+    end
+  end
+
+  defp summarize(messages, config) do
+    transcript = Enum.map_join(messages, "\n", fn m -> "#{m.role}: #{message_text(m)}" end)
+
+    prompt =
+      "Summarize this conversation transcript concisely, preserving key facts, " <>
+        "decisions, tool results, and open tasks:\n\n" <> transcript
+
+    case ReqLLM.generate_text(config.model, Context.new([Context.user(prompt)]),
+           api_key: config.api_key,
+           max_tokens: 1024,
+           receive_timeout: config.receive_timeout
+         ) do
+      {:ok, resp} -> {:ok, Response.text(resp)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp message_text(%{content: content}) when is_list(content) do
+    Enum.map_join(content, " ", fn
+      %{text: text} when is_binary(text) -> text
+      _ -> ""
+    end)
+  end
+
+  defp message_text(_message), do: ""
 
   defp decode_args(json) when json in [nil, ""], do: %{}
 

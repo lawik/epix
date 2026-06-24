@@ -25,6 +25,12 @@ defmodule Epix.Event do
           | {:cancelled, %{step: non_neg_integer()}}
           | {:steering, %{count: pos_integer()}}
           | {:follow_up, %{count: pos_integer()}}
+          | {:compaction,
+             %{
+               reason: :threshold | :overflow,
+               before: non_neg_integer(),
+               after: non_neg_integer()
+             }}
 
   @type emit :: (t() -> any())
 

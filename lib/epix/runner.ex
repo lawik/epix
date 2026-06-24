@@ -30,6 +30,9 @@ defmodule Epix.Runner do
                         {:ok, Loop.Turn.t()} | {:error, term()})
   @type tool_fun :: (ReqLLM.ToolCall.t(), run_ctx() -> String.t())
 
+  # Compact-and-retry attempts when a model call reports a context overflow.
+  @overflow_retries 1
+
   @doc """
   Runs the loop to termination. Returns `{result, final_state}`.
 
@@ -45,17 +48,20 @@ defmodule Epix.Runner do
       emit: Keyword.get(opts, :emit, Event.noop()),
       abort: Keyword.get(opts, :abort) || Abort.new(),
       steering: Keyword.get(opts, :steering, &no_messages/0),
-      follow_up: Keyword.get(opts, :follow_up, &no_messages/0)
+      follow_up: Keyword.get(opts, :follow_up, &no_messages/0),
+      compaction: Keyword.get(opts, :compaction, &default_compaction/1)
     }
 
     drive(state, model_fun, tool_fun, rctx, Keyword.get(opts, :verbose, false))
   end
 
   defp no_messages(), do: []
+  defp default_compaction(messages), do: {:ok, messages}
 
   defp drive(state, model_fun, tool_fun, rctx, verbose) do
-    # Cancellation requested between steps (e.g. during/after tool execution).
-    if state.phase != :done and Abort.cancelled?(rctx.abort) do
+    # A set cancellation token wins, even on a run-completing turn (the cancel
+    # may land while the final model call is in flight).
+    if Abort.cancelled?(rctx.abort) do
       halt_cancelled(state, rctx.emit)
     else
       step(Loop.next(state), model_fun, tool_fun, rctx, verbose, rctx.emit)
@@ -78,13 +84,13 @@ defmodule Epix.Runner do
     do: {result, state}
 
   defp step({:call_model, state}, model_fun, tool_fun, rctx, verbose, emit) do
-    state = pull_steering(state, rctx)
+    state = state |> pull_steering(rctx) |> maybe_compact(rctx)
     emit.({:status, :thinking})
     emit.({:request, %{step: state.step}})
     started = System.monotonic_time(:millisecond)
 
-    case model_fun.(state.context, state.config, rctx) do
-      {:ok, turn} ->
+    case call_model(state, model_fun, rctx, @overflow_retries) do
+      {:ok, turn, state} ->
         elapsed = System.monotonic_time(:millisecond) - started
 
         emit.(
@@ -94,10 +100,10 @@ defmodule Epix.Runner do
         emit.({:assistant, summarize(turn)})
         drive(Loop.apply_turn(state, turn), model_fun, tool_fun, rctx, verbose)
 
-      {:error, :cancelled} ->
+      {:cancelled, state} ->
         halt_cancelled(state, emit)
 
-      {:error, reason} ->
+      {:error, reason, state} ->
         emit.({:error, reason})
         drive(Loop.apply_error(state, reason), model_fun, tool_fun, rctx, verbose)
     end
@@ -124,6 +130,69 @@ defmodule Epix.Runner do
         rctx.emit.({:steering, %{count: length(contents)}})
         Loop.inject_user(state, contents)
     end
+  end
+
+  # Proactive compaction: shrink the context before a model call when the
+  # estimated size crosses the configured fraction of the context window.
+  defp maybe_compact(state, rctx) do
+    limit = trunc(state.config.context_window * state.config.compaction_threshold)
+
+    if Loop.estimate_tokens(state.context.messages) > limit do
+      compact(state, rctx, :threshold)
+    else
+      state
+    end
+  end
+
+  defp compact(state, rctx, reason) do
+    before = Loop.estimate_tokens(state.context.messages)
+
+    with {:ok, messages} <- rctx.compaction.(state.context.messages),
+         after_tokens = Loop.estimate_tokens(messages),
+         true <- after_tokens < before do
+      rctx.emit.({:compaction, %{reason: reason, before: before, after: after_tokens}})
+      Loop.replace_context(state, messages)
+    else
+      # Compaction failed or did not shrink the context: keep the original so a
+      # genuine overflow surfaces instead of looping or growing.
+      _ -> state
+    end
+  end
+
+  # Call the model, recovering from a context overflow by compacting and retrying.
+  defp call_model(state, model_fun, rctx, retries) do
+    case model_fun.(state.context, state.config, rctx) do
+      {:ok, turn} ->
+        {:ok, turn, state}
+
+      {:error, :cancelled} ->
+        {:cancelled, state}
+
+      {:error, reason} ->
+        compacted =
+          if retries > 0 and overflow?(reason), do: compact(state, rctx, :overflow), else: state
+
+        if compacted != state,
+          do: call_model(compacted, model_fun, rctx, retries - 1),
+          else: {:error, reason, state}
+    end
+  end
+
+  defp overflow?(:context_overflow), do: true
+  defp overflow?(reason) when is_binary(reason), do: overflow_text?(reason)
+  defp overflow?(reason), do: overflow_text?(inspect(reason))
+
+  defp overflow_text?(text) do
+    text = String.downcase(text)
+
+    String.contains?(text, [
+      "context length",
+      "context_length",
+      "maximum context",
+      "context window",
+      "too many tokens",
+      "reduce the length"
+    ])
   end
 
   defp run_one(call, tool_fun, rctx, verbose) do

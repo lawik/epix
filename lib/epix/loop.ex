@@ -103,6 +103,31 @@ defmodule Epix.Loop do
     %{state | context: context, phase: :model}
   end
 
+  @doc "Replaces the conversation messages (used by compaction)."
+  @spec replace_context(State.t(), [ReqLLM.Message.t()]) :: State.t()
+  def replace_context(%State{} = state, messages) when is_list(messages) do
+    %{state | context: %{state.context | messages: messages}}
+  end
+
+  @doc """
+  Rough token estimate for a message list (~4 chars/token over text content).
+
+  Good enough to decide when to compact; not a substitute for a real tokenizer.
+  """
+  @spec estimate_tokens([ReqLLM.Message.t()]) :: non_neg_integer()
+  def estimate_tokens(messages) when is_list(messages) do
+    messages |> Enum.reduce(0, fn message, acc -> acc + message_chars(message) end) |> div(4)
+  end
+
+  defp message_chars(%{content: content}) when is_list(content) do
+    Enum.reduce(content, 0, fn part, acc -> acc + part_chars(part) end)
+  end
+
+  defp message_chars(_message), do: 0
+
+  defp part_chars(%{text: text}) when is_binary(text), do: byte_size(text)
+  defp part_chars(_part), do: 0
+
   @doc """
   Folds tool results back into the context and advances the step.
 
