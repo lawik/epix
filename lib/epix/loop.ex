@@ -85,6 +85,10 @@ defmodule Epix.Loop do
     %{state | phase: :done, error: reason}
   end
 
+  @doc "Terminates the run as cancelled. Result becomes `{:error, :cancelled}`."
+  @spec cancel(State.t()) :: State.t()
+  def cancel(%State{} = state), do: apply_error(state, :cancelled)
+
   @doc """
   Folds tool results back into the context and advances the step.
 

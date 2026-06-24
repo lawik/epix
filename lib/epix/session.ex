@@ -15,7 +15,7 @@ defmodule Epix.Session do
 
   use GenServer
 
-  alias Epix.{Loop, Model, Runner, SystemPrompt, Tools}
+  alias Epix.{Abort, Loop, Model, Runner, SystemPrompt, Tools}
   alias Epix.Loop.{Config, Turn}
   alias Epix.Lua.Sandbox
   alias ReqLLM.{Context, Response, StreamResponse}
@@ -87,7 +87,7 @@ defmodule Epix.Session do
     context = Context.append(state.context, Context.user(prompt))
     loop_state = Loop.init(context, config)
 
-    run_opts = [verbose: state.verbose] ++ Keyword.take(opts, [:emit])
+    run_opts = [verbose: state.verbose] ++ Keyword.take(opts, [:emit, :abort])
 
     {result, final} =
       Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)
@@ -102,34 +102,85 @@ defmodule Epix.Session do
 
   defp model_fun(config) do
     fn context, %Config{} = cfg, rctx ->
-      try do
-        case ReqLLM.stream_text(config.model, context,
-               tools: cfg.tools,
-               api_key: cfg.api_key,
-               temperature: cfg.temperature,
-               max_tokens: cfg.max_tokens,
-               receive_timeout: cfg.receive_timeout,
-               metadata_timeout: cfg.receive_timeout
-             ) do
-          {:ok, stream_response} -> consume_stream(stream_response, rctx)
-          {:error, reason} -> {:error, reason}
+      isolated_call(fn -> stream_call(config, cfg, context, rctx) end, rctx.abort)
+    end
+  end
+
+  defp stream_call(config, cfg, context, rctx) do
+    case ReqLLM.stream_text(config.model, context,
+           tools: cfg.tools,
+           api_key: cfg.api_key,
+           temperature: cfg.temperature,
+           max_tokens: cfg.max_tokens,
+           receive_timeout: cfg.receive_timeout
+         ) do
+      {:ok, stream_response} -> consume_stream(stream_response, rctx)
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  # Run the model call in an isolated, monitored (unlinked) process so the
+  # provider's StreamServer/MetadataHandle link to *it*, not the Session. Once the
+  # result is in hand the worker is killed, tearing those down (no per-call leak);
+  # a cancellation kills it mid-stream, aborting the in-flight HTTP request.
+  defp isolated_call(fun, abort) do
+    parent = self()
+
+    {worker, ref} =
+      spawn_monitor(fn ->
+        send(parent, {:model_done, self(), fun.()})
+
+        receive do
+          :stop -> :ok
+        after
+          30_000 -> :ok
         end
-      rescue
-        exception -> {:error, Exception.message(exception)}
-      end
+      end)
+
+    result = await_isolated(worker, ref, abort)
+    Process.exit(worker, :kill)
+    Process.demonitor(ref, [:flush])
+    result
+  end
+
+  defp await_isolated(worker, ref, abort) do
+    receive do
+      {:model_done, ^worker, result} -> result
+      {:DOWN, ^ref, :process, ^worker, reason} -> {:error, {:model_crashed, reason}}
+    after
+      50 ->
+        if Abort.cancelled?(abort),
+          do: {:error, :cancelled},
+          else: await_isolated(worker, ref, abort)
     end
   end
 
   # Tap the stream once: emit deltas as chunks arrive, then let `to_response`
   # drive the same tapped stream to build the final turn. Consuming the stream
   # twice would fail (one-shot HTTP body), so the tap and the build share one pass.
+  #
+  # The tap also checks the abort token per chunk: on cancellation it calls the
+  # stream's own `cancel` for a graceful teardown (no killed-process log) and
+  # throws past `to_response` (whose catch only handles `:exit`, not `:throw`).
   defp consume_stream(stream_response, rctx) do
-    tapped = Stream.each(stream_response.stream, &emit_chunk(&1, rctx.emit))
+    tapped =
+      Stream.each(stream_response.stream, fn chunk ->
+        if Abort.cancelled?(rctx.abort) do
+          stream_response.cancel.()
+          throw(:epix_cancelled)
+        end
+
+        emit_chunk(chunk, rctx.emit)
+      end)
 
     case StreamResponse.to_response(%{stream_response | stream: tapped}) do
       {:ok, %Response{} = resp} -> {:ok, normalize(resp)}
       {:error, reason} -> {:error, reason}
     end
+  catch
+    :throw, :epix_cancelled -> {:error, :cancelled}
   end
 
   defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text),

@@ -48,38 +48,52 @@ defmodule Epix.Runner do
   end
 
   defp drive(state, model_fun, tool_fun, rctx, verbose) do
-    emit = rctx.emit
-
-    case Loop.next(state) do
-      {:halt, result, state} ->
-        {result, state}
-
-      {:call_model, state} ->
-        emit.({:status, :thinking})
-        emit.({:request, %{step: state.step}})
-        started = System.monotonic_time(:millisecond)
-
-        case model_fun.(state.context, state.config, rctx) do
-          {:ok, turn} ->
-            elapsed = System.monotonic_time(:millisecond) - started
-
-            emit.(
-              {:response, %{finish_reason: turn.finish_reason, ms: elapsed, tokens: tokens(turn)}}
-            )
-
-            emit.({:assistant, summarize(turn)})
-            drive(Loop.apply_turn(state, turn), model_fun, tool_fun, rctx, verbose)
-
-          {:error, reason} ->
-            emit.({:error, reason})
-            drive(Loop.apply_error(state, reason), model_fun, tool_fun, rctx, verbose)
-        end
-
-      {:run_tools, calls, state} ->
-        emit.({:status, :running_tools})
-        results = Enum.map(calls, &run_one(&1, tool_fun, rctx, verbose))
-        drive(Loop.apply_tool_results(state, results), model_fun, tool_fun, rctx, verbose)
+    # Cancellation requested between steps (e.g. during/after tool execution).
+    if state.phase != :done and Abort.cancelled?(rctx.abort) do
+      halt_cancelled(state, rctx.emit)
+    else
+      step(Loop.next(state), model_fun, tool_fun, rctx, verbose, rctx.emit)
     end
+  end
+
+  defp step({:halt, result, state}, _model_fun, _tool_fun, _rctx, _verbose, _emit),
+    do: {result, state}
+
+  defp step({:call_model, state}, model_fun, tool_fun, rctx, verbose, emit) do
+    emit.({:status, :thinking})
+    emit.({:request, %{step: state.step}})
+    started = System.monotonic_time(:millisecond)
+
+    case model_fun.(state.context, state.config, rctx) do
+      {:ok, turn} ->
+        elapsed = System.monotonic_time(:millisecond) - started
+
+        emit.(
+          {:response, %{finish_reason: turn.finish_reason, ms: elapsed, tokens: tokens(turn)}}
+        )
+
+        emit.({:assistant, summarize(turn)})
+        drive(Loop.apply_turn(state, turn), model_fun, tool_fun, rctx, verbose)
+
+      {:error, :cancelled} ->
+        halt_cancelled(state, emit)
+
+      {:error, reason} ->
+        emit.({:error, reason})
+        drive(Loop.apply_error(state, reason), model_fun, tool_fun, rctx, verbose)
+    end
+  end
+
+  defp step({:run_tools, calls, state}, model_fun, tool_fun, rctx, verbose, emit) do
+    emit.({:status, :running_tools})
+    results = Enum.map(calls, &run_one(&1, tool_fun, rctx, verbose))
+    drive(Loop.apply_tool_results(state, results), model_fun, tool_fun, rctx, verbose)
+  end
+
+  defp halt_cancelled(state, emit) do
+    emit.({:cancelled, %{step: state.step}})
+    cancelled = Loop.cancel(state)
+    {Loop.result(cancelled), cancelled}
   end
 
   defp run_one(call, tool_fun, rctx, verbose) do

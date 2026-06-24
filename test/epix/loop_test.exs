@@ -6,6 +6,7 @@ defmodule Epix.LoopTest do
   """
   use ExUnit.Case, async: true
 
+  alias Epix.Abort
   alias Epix.Loop
   alias Epix.Loop.{Config, Turn}
   alias Epix.Runner
@@ -175,6 +176,61 @@ defmodule Epix.LoopTest do
 
       assert result == {:ok, "Hello"}
       assert for({:text_delta, t} <- events, do: t) == ["Hel", "lo"]
+    end
+  end
+
+  describe "cancellation" do
+    test "an already-cancelled token halts before the model is ever called" do
+      abort = Abort.new()
+      Abort.cancel(abort)
+
+      model = fn _ctx, _cfg, _rctx -> flunk("model must not be called when cancelled") end
+      {result, final} = Runner.run(init_state(), model, fn _c, _r -> "" end, abort: abort)
+
+      assert result == {:error, :cancelled}
+      assert final.error == :cancelled
+    end
+
+    test "a model_fun returning {:error, :cancelled} terminates as cancelled" do
+      model = fn _ctx, _cfg, _rctx -> {:error, :cancelled} end
+      {result, _final} = Runner.run(init_state(), model, fn _c, _r -> "" end)
+      assert result == {:error, :cancelled}
+    end
+
+    test "cancelling during tool execution halts before the next model call" do
+      call = tool_call("c1", "lua_eval", "{}")
+      abort = Abort.new()
+
+      model = fn _ctx, _cfg, _rctx ->
+        {:ok,
+         %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}}
+      end
+
+      # The tool cancels mid-run; the next drive iteration must halt.
+      tool = fn _c, rctx ->
+        Abort.cancel(rctx.abort)
+        "done"
+      end
+
+      {result, final} = Runner.run(init_state(), model, tool, abort: abort)
+
+      assert result == {:error, :cancelled}
+      assert final.step == 1
+    end
+
+    test "cancellation emits a :cancelled event with the step" do
+      abort = Abort.new()
+      Abort.cancel(abort)
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+
+      Runner.run(init_state(), fn _c, _f, _r -> {:ok, %Turn{}} end, fn _c, _r -> "" end,
+        abort: abort,
+        emit: emit
+      )
+
+      events = Agent.get(collector, &Enum.reverse/1)
+      assert {:cancelled, %{step: 0}} in events
     end
   end
 end
