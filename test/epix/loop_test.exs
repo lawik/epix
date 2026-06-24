@@ -92,8 +92,8 @@ defmodule Epix.LoopTest do
 
     test "estimate_tokens counts tool-call arguments, not just text content" do
       call = tool_call("c1", "lua_eval", String.duplicate("x", 100))
-      # content is [] but the 100-char args + name must be counted (~27 tokens)
-      assert Loop.estimate_tokens([assistant_with_call(call)]) > 20
+      # content is [] but the 100-char args + 8-char name must be counted: 108/4 = 27.
+      assert Loop.estimate_tokens([assistant_with_call(call)]) == 27
     end
   end
 
@@ -412,17 +412,41 @@ defmodule Epix.LoopTest do
       model
     end
 
-    # Completes in reverse order (t_a slowest) to prove ordered output != completion order.
-    defp staggered_tool(gauge) do
-      delays = %{"t_a" => 50, "t_b" => 25, "t_c" => 0}
-
+    # Barrier tool: blocks until all `n` tools are concurrently in flight, so the
+    # concurrency check is deterministic (no reliance on sleep/overlap timing).
+    defp barrier_tool(gauge, n) do
       fn call, _rctx ->
-        name = call.function.name
         Agent.update(gauge, fn {c, m} -> {c + 1, max(m, c + 1)} end)
-        Process.sleep(Map.get(delays, name, 0))
+        wait_for(fn -> elem(Agent.get(gauge, & &1), 0) >= n end, 1000)
         Agent.update(gauge, fn {c, m} -> {c - 1, m} end)
-        name
+        call.function.name
       end
+    end
+
+    # No blocking: under sequential execution the gauge can never exceed 1.
+    defp serial_tool(gauge) do
+      fn call, _rctx ->
+        Agent.update(gauge, fn {c, m} -> {c + 1, max(m, c + 1)} end)
+        Agent.update(gauge, fn {c, m} -> {c - 1, m} end)
+        call.function.name
+      end
+    end
+
+    defp wait_for(pred, timeout) do
+      deadline = System.monotonic_time(:millisecond) + timeout
+      do_wait_for(pred, deadline)
+    end
+
+    defp do_wait_for(pred, deadline) do
+      cond do
+        pred.() -> :ok
+        System.monotonic_time(:millisecond) >= deadline -> :timeout
+        true -> Process.sleep(1) && do_wait_for(pred, deadline)
+      end
+    end
+
+    defp tool_ids(final) do
+      final.context.messages |> Enum.filter(&(&1.role == :tool)) |> Enum.map(& &1.tool_call_id)
     end
 
     defp tool_bodies(final) do
@@ -443,7 +467,7 @@ defmodule Epix.LoopTest do
 
     defp tool_body(_message), do: ""
 
-    test "parallel execution runs tools concurrently and preserves source order" do
+    test "parallel execution runs tools concurrently, preserving order and pairing" do
       calls = three_calls()
       {:ok, gauge} = Agent.start_link(fn -> {0, 0} end)
 
@@ -451,12 +475,18 @@ defmodule Epix.LoopTest do
         Runner.run(
           init_state(tool_execution: :parallel),
           three_call_model(calls),
-          staggered_tool(gauge)
+          barrier_tool(gauge, 3)
         )
 
       assert result == {:ok, "done"}
-      assert elem(Agent.get(gauge, & &1), 1) >= 2
+      # The barrier forces all three to be concurrent: the max is exactly 3.
+      assert elem(Agent.get(gauge, & &1), 1) == 3
       assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
+      # One tool message per call id, in source order, paired with the assistant turn.
+      assert tool_ids(final) == ["a", "b", "c"]
+
+      roles = Enum.map(final.context.messages, & &1.role)
+      assert roles == [:user, :assistant, :tool, :tool, :tool, :assistant]
     end
 
     test "sequential execution runs one tool at a time, preserving order" do
@@ -467,12 +497,13 @@ defmodule Epix.LoopTest do
         Runner.run(
           init_state(tool_execution: :sequential),
           three_call_model(calls),
-          staggered_tool(gauge)
+          serial_tool(gauge)
         )
 
       assert result == {:ok, "done"}
       assert elem(Agent.get(gauge, & &1), 1) == 1
       assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
+      assert tool_ids(final) == ["a", "b", "c"]
     end
 
     test "a raising tool is contained as a tool result, not a crash" do
