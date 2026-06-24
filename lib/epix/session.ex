@@ -87,7 +87,8 @@ defmodule Epix.Session do
     context = Context.append(state.context, Context.user(prompt))
     loop_state = Loop.init(context, config)
 
-    run_opts = [verbose: state.verbose] ++ Keyword.take(opts, [:emit, :abort])
+    run_opts =
+      [verbose: state.verbose] ++ Keyword.take(opts, [:emit, :abort, :steering, :follow_up])
 
     {result, final} =
       Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)

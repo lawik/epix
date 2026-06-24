@@ -23,6 +23,8 @@ defmodule Epix.Event do
           | {:tool_result, %{name: String.t(), body: String.t()}}
           | {:error, term()}
           | {:cancelled, %{step: non_neg_integer()}}
+          | {:steering, %{count: pos_integer()}}
+          | {:follow_up, %{count: pos_integer()}}
 
   @type emit :: (t() -> any())
 

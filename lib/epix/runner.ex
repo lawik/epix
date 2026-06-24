@@ -34,18 +34,24 @@ defmodule Epix.Runner do
   Runs the loop to termination. Returns `{result, final_state}`.
 
   Options: `:emit` (`Epix.Event.emit`, default no-op), `:abort` (`Epix.Abort.t`,
-  default a fresh token), `:verbose` (log, default false).
+  default a fresh token), `:steering` / `:follow_up` (0-arity functions returning
+  a list of user-message contents — pulled before each model call and when the
+  run would otherwise halt, respectively), `:verbose` (log, default false).
   """
   @spec run(Loop.State.t(), model_fun(), tool_fun(), keyword()) ::
           {Loop.result(), Loop.State.t()}
   def run(%Loop.State{} = state, model_fun, tool_fun, opts \\ []) do
     rctx = %{
       emit: Keyword.get(opts, :emit, Event.noop()),
-      abort: Keyword.get(opts, :abort) || Abort.new()
+      abort: Keyword.get(opts, :abort) || Abort.new(),
+      steering: Keyword.get(opts, :steering, &no_messages/0),
+      follow_up: Keyword.get(opts, :follow_up, &no_messages/0)
     }
 
     drive(state, model_fun, tool_fun, rctx, Keyword.get(opts, :verbose, false))
   end
+
+  defp no_messages(), do: []
 
   defp drive(state, model_fun, tool_fun, rctx, verbose) do
     # Cancellation requested between steps (e.g. during/after tool execution).
@@ -56,10 +62,23 @@ defmodule Epix.Runner do
     end
   end
 
+  # A normally-completed run can be resumed by follow-up messages.
+  defp step({:halt, {:ok, _} = result, state}, model_fun, tool_fun, rctx, verbose, _emit) do
+    case rctx.follow_up.() do
+      [] ->
+        {result, state}
+
+      contents ->
+        rctx.emit.({:follow_up, %{count: length(contents)}})
+        drive(Loop.inject_user(state, contents), model_fun, tool_fun, rctx, verbose)
+    end
+  end
+
   defp step({:halt, result, state}, _model_fun, _tool_fun, _rctx, _verbose, _emit),
     do: {result, state}
 
   defp step({:call_model, state}, model_fun, tool_fun, rctx, verbose, emit) do
+    state = pull_steering(state, rctx)
     emit.({:status, :thinking})
     emit.({:request, %{step: state.step}})
     started = System.monotonic_time(:millisecond)
@@ -94,6 +113,17 @@ defmodule Epix.Runner do
     emit.({:cancelled, %{step: state.step}})
     cancelled = Loop.cancel(state)
     {Loop.result(cancelled), cancelled}
+  end
+
+  defp pull_steering(state, rctx) do
+    case rctx.steering.() do
+      [] ->
+        state
+
+      contents ->
+        rctx.emit.({:steering, %{count: length(contents)}})
+        Loop.inject_user(state, contents)
+    end
   end
 
   defp run_one(call, tool_fun, rctx, verbose) do

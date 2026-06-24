@@ -233,4 +233,58 @@ defmodule Epix.LoopTest do
       assert {:cancelled, %{step: 0}} in events
     end
   end
+
+  describe "steering and follow-up" do
+    defp once(batch) do
+      {:ok, q} = Agent.start_link(fn -> [batch] end)
+
+      fn ->
+        Agent.get_and_update(q, fn
+          [head | tail] -> {head, tail}
+          [] -> {[], []}
+        end)
+      end
+    end
+
+    test "steering injects user messages before the model call and emits an event" do
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+
+      model = fn _ctx, _cfg, _rctx ->
+        {:ok, %Turn{message: assistant_msg(), text: "ok", finish_reason: :stop}}
+      end
+
+      {result, final} =
+        Runner.run(init_state(), model, fn _c, _r -> "" end,
+          steering: once(["steer this"]),
+          emit: emit
+        )
+
+      assert result == {:ok, "ok"}
+      # initial "hi" + injected "steer this"
+      assert Enum.count(final.context.messages, &(&1.role == :user)) == 2
+      assert {:steering, %{count: 1}} in Agent.get(collector, &Enum.reverse/1)
+    end
+
+    test "follow-up resumes a completed run and emits an event" do
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+
+      {model, _} =
+        scripted([
+          %Turn{message: assistant_msg(), text: "first", finish_reason: :stop},
+          %Turn{message: assistant_msg(), text: "second", finish_reason: :stop}
+        ])
+
+      {result, final} =
+        Runner.run(init_state(), model, fn _c, _r -> "" end,
+          follow_up: once(["continue"]),
+          emit: emit
+        )
+
+      assert result == {:ok, "second"}
+      assert Enum.count(final.context.messages, &(&1.role == :user)) == 2
+      assert {:follow_up, %{count: 1}} in Agent.get(collector, &Enum.reverse/1)
+    end
+  end
 end

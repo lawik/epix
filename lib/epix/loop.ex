@@ -90,6 +90,20 @@ defmodule Epix.Loop do
   def cancel(%State{} = state), do: apply_error(state, :cancelled)
 
   @doc """
+  Appends user messages and (re)enters the model phase.
+
+  Used for steering (inject before the next model call) and follow-up (resume a
+  run that would otherwise halt). Each entry is a string or content-part list.
+  """
+  @spec inject_user(State.t(), [String.t() | list()]) :: State.t()
+  def inject_user(%State{} = state, []), do: state
+
+  def inject_user(%State{} = state, contents) when is_list(contents) do
+    context = Enum.reduce(contents, state.context, &Context.append(&2, Context.user(&1)))
+    %{state | context: context, phase: :model}
+  end
+
+  @doc """
   Folds tool results back into the context and advances the step.
 
   `results` is a list of `%{id: tool_call_id, body: text}` in call order.
