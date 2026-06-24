@@ -111,8 +111,24 @@ defmodule Epix.Runner do
 
   defp step({:run_tools, calls, state}, model_fun, tool_fun, rctx, verbose, emit) do
     emit.({:status, :running_tools})
-    results = Enum.map(calls, &run_one(&1, tool_fun, rctx, verbose))
+    results = run_tools(calls, tool_fun, rctx, verbose, state.config)
     drive(Loop.apply_tool_results(state, results), model_fun, tool_fun, rctx, verbose)
+  end
+
+  defp run_tools(calls, tool_fun, rctx, verbose, %{tool_execution: :sequential}) do
+    Enum.map(calls, &run_one(&1, tool_fun, rctx, verbose))
+  end
+
+  # Parallel by default (like Pi); results stay in assistant source order via
+  # `ordered: true`. The Session opts into :sequential for its shared Lua sandbox.
+  defp run_tools(calls, tool_fun, rctx, verbose, config) do
+    calls
+    |> Task.async_stream(&run_one(&1, tool_fun, rctx, verbose),
+      ordered: true,
+      max_concurrency: config.max_tool_concurrency,
+      timeout: :infinity
+    )
+    |> Enum.map(fn {:ok, result} -> result end)
   end
 
   defp halt_cancelled(state, emit) do

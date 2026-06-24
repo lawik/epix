@@ -373,4 +373,86 @@ defmodule Epix.LoopTest do
       assert result == {:error, :context_overflow}
     end
   end
+
+  describe "tool execution" do
+    defp three_calls,
+      do: [tool_call("a", "t_a", "{}"), tool_call("b", "t_b", "{}"), tool_call("c", "t_c", "{}")]
+
+    defp three_call_model(calls) do
+      {model, _} =
+        scripted([
+          %Turn{
+            message: %Message{role: :assistant, content: [], tool_calls: calls},
+            tool_calls: calls,
+            finish_reason: :tool_calls
+          },
+          %Turn{message: assistant_msg(), text: "done", finish_reason: :stop}
+        ])
+
+      model
+    end
+
+    # Completes in reverse order (t_a slowest) to prove ordered output != completion order.
+    defp staggered_tool(gauge) do
+      delays = %{"t_a" => 50, "t_b" => 25, "t_c" => 0}
+
+      fn call, _rctx ->
+        name = call.function.name
+        Agent.update(gauge, fn {c, m} -> {c + 1, max(m, c + 1)} end)
+        Process.sleep(Map.get(delays, name, 0))
+        Agent.update(gauge, fn {c, m} -> {c - 1, m} end)
+        name
+      end
+    end
+
+    defp tool_bodies(final) do
+      final.context.messages
+      |> Enum.filter(&(&1.role == :tool))
+      |> Enum.map(&tool_body/1)
+    end
+
+    defp tool_body(%{content: content}) when is_binary(content), do: content
+
+    defp tool_body(%{content: content}) when is_list(content) do
+      Enum.map_join(content, "", fn
+        %{text: text} when is_binary(text) -> text
+        text when is_binary(text) -> text
+        _ -> ""
+      end)
+    end
+
+    defp tool_body(_message), do: ""
+
+    test "parallel execution runs tools concurrently and preserves source order" do
+      calls = three_calls()
+      {:ok, gauge} = Agent.start_link(fn -> {0, 0} end)
+
+      {result, final} =
+        Runner.run(
+          init_state(tool_execution: :parallel),
+          three_call_model(calls),
+          staggered_tool(gauge)
+        )
+
+      assert result == {:ok, "done"}
+      assert elem(Agent.get(gauge, & &1), 1) >= 2
+      assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
+    end
+
+    test "sequential execution runs one tool at a time, preserving order" do
+      calls = three_calls()
+      {:ok, gauge} = Agent.start_link(fn -> {0, 0} end)
+
+      {result, final} =
+        Runner.run(
+          init_state(tool_execution: :sequential),
+          three_call_model(calls),
+          staggered_tool(gauge)
+        )
+
+      assert result == {:ok, "done"}
+      assert elem(Agent.get(gauge, & &1), 1) == 1
+      assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
+    end
+  end
 end

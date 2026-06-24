@@ -70,18 +70,17 @@ defmodule Epix.Session do
     {:ok, state}
   end
 
+  # Numeric/threshold defaults come from the Config struct; opts override them.
+  # Here we only supply the runtime-computed defaults (model/api_key/tools) and
+  # override tool_execution to :sequential, because the Lua tools share the
+  # sandbox registry (define then run); callers can opt into :parallel.
   defp build_config(opts) do
-    %Config{
-      model: opts[:model] || Model.berget(),
-      api_key: opts[:api_key] || Model.api_key(),
-      tools: Tools.specs(),
-      max_steps: opts[:max_steps] || 8,
-      temperature: opts[:temperature] || 0.2,
-      max_tokens: opts[:max_tokens] || 1024,
-      receive_timeout: opts[:receive_timeout] || 60_000,
-      context_window: opts[:context_window] || 128_000,
-      compaction_threshold: opts[:compaction_threshold] || 0.8
-    }
+    opts
+    |> Keyword.put_new_lazy(:model, &Model.berget/0)
+    |> Keyword.put_new_lazy(:api_key, &Model.api_key/0)
+    |> Keyword.put_new_lazy(:tools, &Tools.specs/0)
+    |> Keyword.put_new(:tool_execution, :sequential)
+    |> then(&struct(Config, &1))
   end
 
   @impl true
