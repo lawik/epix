@@ -27,14 +27,28 @@ defmodule Epix.Lua.SandboxTest do
       assert {:error, _} = Sandbox.eval(s, "return os.getenv('HOME')")
     end
 
-    test "returns compile errors", %{sandbox: s} do
+    test "returns compile errors mentioning the failure", %{sandbox: s} do
       assert {:error, message} = Sandbox.eval(s, "return (")
-      assert is_binary(message)
+      assert message =~ ~r/compile/i
     end
 
     test "returns runtime errors", %{sandbox: s} do
       assert {:error, message} = Sandbox.eval(s, "return host.nope()")
-      assert is_binary(message)
+      assert is_binary(message) and message != ""
+    end
+
+    test "host functions raise a clean error on bad arguments (no module leak)", %{sandbox: s} do
+      assert {:error, message} = Sandbox.eval(s, "return host.add(1)")
+      assert message =~ "host.add expects"
+      refute message =~ "Epix.Lua.HostApi"
+
+      assert {:error, message} = Sandbox.eval(s, "return host.upper(123)")
+      assert message =~ "host.upper expects"
+    end
+
+    test "unencodable values are not leaked via inspect", %{sandbox: s} do
+      # echo of a function ref cannot be JSON-encoded; must not leak Erlang internals.
+      assert {:ok, "<unencodable lua value>"} = Sandbox.eval(s, "return host.echo(print)")
     end
   end
 
@@ -60,6 +74,12 @@ defmodule Epix.Lua.SandboxTest do
     test "surfaces runtime errors from a tool body", %{sandbox: s} do
       assert :ok = Sandbox.define_tool(s, "boom", "fails", [], "return nothing.here")
       assert {:error, _} = Sandbox.run_tool(s, "boom", %{})
+    end
+
+    test "rejects a non-identifier parameter name", %{sandbox: s} do
+      assert {:error, message} = Sandbox.define_tool(s, "t", "d", ["bad-name"], "return 1")
+      assert message =~ "invalid parameter name"
+      assert [] = Sandbox.list_tools(s)
     end
   end
 end

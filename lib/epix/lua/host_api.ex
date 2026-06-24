@@ -76,14 +76,17 @@ defmodule Epix.Lua.HostApi do
   @spec echo([term()]) :: [term()]
   def echo(args), do: args
 
-  @spec add([number()]) :: [number()]
-  def add([a, b]), do: [a + b]
+  @spec add([term()]) :: [number()]
+  def add([a, b]) when is_number(a) and is_number(b), do: [a + b]
+  def add(_args), do: raise(Lua.RuntimeException, "host.add expects two numbers")
 
-  @spec upper([String.t()]) :: [String.t()]
+  @spec upper([term()]) :: [String.t()]
   def upper([s]) when is_binary(s), do: [String.upcase(s)]
+  def upper(_args), do: raise(Lua.RuntimeException, "host.upper expects a string")
 
-  @spec reverse([String.t()]) :: [String.t()]
+  @spec reverse([term()]) :: [String.t()]
   def reverse([s]) when is_binary(s), do: [String.reverse(s)]
+  def reverse(_args), do: raise(Lua.RuntimeException, "host.reverse expects a string")
 
   @spec now([term()]) :: [integer()]
   def now(_args), do: [System.os_time(:second)]

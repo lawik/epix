@@ -58,8 +58,11 @@ defmodule Epix.Lua.Runtime do
     {results, _lua} = fun.()
     {:ok, format(results)}
   rescue
+    # Lua compile/runtime errors are useful to the model, so surface them. Any
+    # other exception (e.g. a host FunctionClauseError) would leak Elixir module
+    # paths/internals, so report it generically.
     e in [Lua.CompilerException, Lua.RuntimeException] -> {:error, Exception.message(e)}
-    e -> {:error, Exception.message(e)}
+    _other -> {:error, "Lua evaluation failed"}
   end
 
   defp format([]), do: "nil"
@@ -69,7 +72,9 @@ defmodule Epix.Lua.Runtime do
   defp format_value(value) do
     case Jason.encode(value) do
       {:ok, json} -> json
-      {:error, _} -> inspect(value)
+      # Never inspect/1 the value: Luerl function refs, closures, and raw binaries
+      # leak Erlang/Elixir internals to the model. Return a neutral placeholder.
+      {:error, _} -> "<unencodable lua value>"
     end
   end
 end

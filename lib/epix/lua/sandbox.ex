@@ -54,13 +54,12 @@ defmodule Epix.Lua.Sandbox do
   def handle_call({:define_tool, name, description, params, code}, _from, state) do
     params = normalize_params(params)
 
-    case Runtime.validate_tool(params, code) do
-      :ok ->
-        tool = %{description: description, params: params, code: code}
-        {:reply, :ok, put_in(state, [:tools, name], tool)}
-
-      {:error, message} ->
-        {:reply, {:error, message}, state}
+    with :ok <- validate_param_names(params),
+         :ok <- Runtime.validate_tool(params, code) do
+      tool = %{description: description, params: params, code: code}
+      {:reply, :ok, put_in(state, [:tools, name], tool)}
+    else
+      {:error, message} -> {:reply, {:error, message}, state}
     end
   end
 
@@ -87,6 +86,16 @@ defmodule Epix.Lua.Sandbox do
 
   defp normalize_params(nil), do: []
   defp normalize_params(params) when is_list(params), do: Enum.map(params, &to_string/1)
+
+  # Params become Lua locals; a non-identifier would compile-fail at run time even
+  # though it passed validation. Reject it up front so a defined tool is runnable.
+  @param_pattern ~r/^[a-zA-Z_][a-zA-Z0-9_]*$/
+  defp validate_param_names(params) do
+    case Enum.find(params, &(not Regex.match?(@param_pattern, &1))) do
+      nil -> :ok
+      bad -> {:error, "invalid parameter name: #{inspect(bad)}"}
+    end
+  end
 
   defp normalize_args(nil), do: %{}
   defp normalize_args(args) when is_map(args), do: args
