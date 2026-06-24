@@ -50,7 +50,13 @@ defmodule Epix.Loop do
 
     cond do
       turn.tool_calls == [] ->
-        %{state | context: context, phase: :done, result: turn.text, stop_reason: turn.finish_reason}
+        %{
+          state
+          | context: context,
+            phase: :done,
+            result: turn.text,
+            stop_reason: turn.finish_reason
+        }
 
       state.step >= state.config.max_steps ->
         %{

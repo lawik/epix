@@ -75,7 +75,8 @@ defmodule Epix.Tools do
   end
 
   @doc "Routes a tool call (by name) into the sandbox. Returns `{:ok | :error, text}`."
-  @spec dispatch(String.t(), map(), GenServer.server()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec dispatch(String.t(), map(), GenServer.server()) ::
+          {:ok, String.t()} | {:error, String.t()}
   def dispatch("lua_eval", %{"code" => code}, sandbox), do: Sandbox.eval(sandbox, code)
 
   def dispatch("lua_define_tool", args, sandbox) do

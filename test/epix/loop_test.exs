@@ -54,7 +54,12 @@ defmodule Epix.LoopTest do
 
     test "a turn with tool calls moves to the tools phase" do
       call = tool_call("c1", "lua_eval", ~s({"code":"return 1"}))
-      turn = %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}
+
+      turn = %Turn{
+        message: assistant_with_call(call),
+        tool_calls: [call],
+        finish_reason: :tool_calls
+      }
 
       state = init_state() |> Loop.apply_turn(turn)
       assert {:run_tools, [^call], _} = Loop.next(state)
@@ -62,7 +67,12 @@ defmodule Epix.LoopTest do
 
     test "tool results advance the step and return to the model phase" do
       call = tool_call("c1", "lua_eval", "{}")
-      turn = %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}
+
+      turn = %Turn{
+        message: assistant_with_call(call),
+        tool_calls: [call],
+        finish_reason: :tool_calls
+      }
 
       state =
         init_state()
@@ -86,7 +96,11 @@ defmodule Epix.LoopTest do
 
       {model_fun, _} =
         scripted([
-          %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls},
+          %Turn{
+            message: assistant_with_call(call),
+            tool_calls: [call],
+            finish_reason: :tool_calls
+          },
           %Turn{message: assistant_msg(), text: "the answer is 4", finish_reason: :stop}
         ])
 
@@ -103,8 +117,10 @@ defmodule Epix.LoopTest do
 
     test "stops at max_steps instead of looping forever" do
       call = tool_call("c1", "lua_eval", "{}")
+
       always_calls = fn _ctx, _cfg, _rctx ->
-        {:ok, %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}}
+        {:ok,
+         %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}}
       end
 
       tool_fun = fn _c, _rctx -> "again" end
@@ -122,7 +138,11 @@ defmodule Epix.LoopTest do
 
       {model_fun, _} =
         scripted([
-          %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls},
+          %Turn{
+            message: assistant_with_call(call),
+            tool_calls: [call],
+            finish_reason: :tool_calls
+          },
           %Turn{message: assistant_msg(), text: "4", finish_reason: :stop}
         ])
 
@@ -148,7 +168,9 @@ defmodule Epix.LoopTest do
         {:ok, %Turn{message: assistant_msg(), text: "Hello", finish_reason: :stop}}
       end
 
-      {result, _final} = Runner.run(init_state(), streaming_model, fn _c, _r -> "" end, emit: emit)
+      {result, _final} =
+        Runner.run(init_state(), streaming_model, fn _c, _r -> "" end, emit: emit)
+
       events = Agent.get(collector, &Enum.reverse/1)
 
       assert result == {:ok, "Hello"}

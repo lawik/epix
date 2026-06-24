@@ -43,7 +43,8 @@ defmodule Epix.Session do
   Options: `:emit` (`Epix.Event.emit`) to observe progress during the run.
   """
   @spec run(t(), String.t(), keyword()) :: Loop.result()
-  def run(session, prompt, opts \\ []), do: GenServer.call(session, {:run, prompt, opts}, :infinity)
+  def run(session, prompt, opts \\ []),
+    do: GenServer.call(session, {:run, prompt, opts}, :infinity)
 
   @doc "Returns the current conversation context."
   @spec context(t()) :: Context.t()
@@ -131,8 +132,12 @@ defmodule Epix.Session do
     end
   end
 
-  defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text), do: emit.({:text_delta, text})
-  defp emit_chunk(%{type: :thinking, text: text}, emit) when is_binary(text), do: emit.({:reasoning_delta, text})
+  defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text),
+    do: emit.({:text_delta, text})
+
+  defp emit_chunk(%{type: :thinking, text: text}, emit) when is_binary(text),
+    do: emit.({:reasoning_delta, text})
+
   defp emit_chunk(_chunk, _emit), do: :ok
 
   defp normalize(%Response{} = resp) do

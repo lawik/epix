@@ -8,7 +8,7 @@ defmodule Epix.Model do
   @base_url "https://api.berget.ai/v1"
   @default_id "zai-org/GLM-5.2"
 
-  @spec berget(String.t()) :: ReqLLM.Model.t()
+  @spec berget(String.t()) :: struct()
   def berget(id \\ @default_id) do
     ReqLLM.model!(%{provider: :openai, id: id, base_url: @base_url})
   end

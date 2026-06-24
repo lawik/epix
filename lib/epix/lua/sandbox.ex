@@ -70,7 +70,8 @@ defmodule Epix.Lua.Sandbox do
         {:reply, Runtime.run_tool(params, code, normalize_args(args)), state}
 
       :error ->
-        {:reply, {:error, "no tool named #{inspect(name)}. Define it first or call lua_list_tools."},
+        {:reply,
+         {:error, "no tool named #{inspect(name)}. Define it first or call lua_list_tools."},
          state}
     end
   end

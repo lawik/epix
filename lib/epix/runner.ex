@@ -62,7 +62,11 @@ defmodule Epix.Runner do
         case model_fun.(state.context, state.config, rctx) do
           {:ok, turn} ->
             elapsed = System.monotonic_time(:millisecond) - started
-            emit.({:response, %{finish_reason: turn.finish_reason, ms: elapsed, tokens: tokens(turn)}})
+
+            emit.(
+              {:response, %{finish_reason: turn.finish_reason, ms: elapsed, tokens: tokens(turn)}}
+            )
+
             emit.({:assistant, summarize(turn)})
             drive(Loop.apply_turn(state, turn), model_fun, tool_fun, rctx, verbose)
 

@@ -15,8 +15,10 @@ defmodule Epix.Event do
           | {:request, %{step: non_neg_integer()}}
           | {:text_delta, String.t()}
           | {:reasoning_delta, String.t()}
-          | {:response, %{finish_reason: atom() | nil, ms: non_neg_integer(), tokens: non_neg_integer()}}
-          | {:assistant, %{text: String.t() | nil, tool_calls: [%{name: String.t(), args: String.t()}]}}
+          | {:response,
+             %{finish_reason: atom() | nil, ms: non_neg_integer(), tokens: non_neg_integer()}}
+          | {:assistant,
+             %{text: String.t() | nil, tool_calls: [%{name: String.t(), args: String.t()}]}}
           | {:tool_start, %{name: String.t()}}
           | {:tool_result, %{name: String.t(), body: String.t()}}
           | {:error, term()}

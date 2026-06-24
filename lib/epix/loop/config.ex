@@ -18,7 +18,7 @@ defmodule Epix.Loop.Config do
             receive_timeout: 60_000
 
   @type t :: %__MODULE__{
-          model: ReqLLM.Model.t() | nil,
+          model: struct() | nil,
           api_key: String.t() | nil,
           tools: [ReqLLM.Tool.t()],
           temperature: number(),

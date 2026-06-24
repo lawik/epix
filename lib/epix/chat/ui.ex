@@ -54,23 +54,39 @@ defmodule Epix.Chat.UI do
 
   def update(:submit, state) do
     case String.trim(state.input) do
-      "" -> {state, []}
-      text -> dispatch_submit(text) && {%{state | input: ""}, []}
+      "" ->
+        {state, []}
+
+      text ->
+        dispatch_submit(text)
+        {%{state | input: ""}, []}
     end
   end
 
   def update({:solve, exposed}, state) do
-    {%{state | messages: exposed.messages, status: exposed.status, log: exposed.log, ticks: 0, scroll: 0}, []}
+    {%{
+       state
+       | messages: exposed.messages,
+         status: exposed.status,
+         log: exposed.log,
+         ticks: 0,
+         scroll: 0
+     }, []}
   end
 
   def update(:tick, %{status: :idle} = state), do: {state, []}
   def update(:tick, state), do: {%{state | ticks: state.ticks + 1}, []}
 
-  def update(:scroll_up, state), do: {%{state | scroll: min(max_scroll(state), state.scroll + page(state))}, []}
+  def update(:scroll_up, state),
+    do: {%{state | scroll: min(max_scroll(state), state.scroll + page(state))}, []}
+
   def update(:scroll_down, state), do: {%{state | scroll: max(0, state.scroll - page(state))}, []}
   def update(:scroll_top, state), do: {%{state | scroll: max_scroll(state)}, []}
   def update(:scroll_bottom, state), do: {%{state | scroll: 0}, []}
-  def update(:wheel_up, state), do: {%{state | scroll: min(max_scroll(state), state.scroll + 3)}, []}
+
+  def update(:wheel_up, state),
+    do: {%{state | scroll: min(max_scroll(state), state.scroll + 3)}, []}
+
   def update(:wheel_down, state), do: {%{state | scroll: max(0, state.scroll - 3)}, []}
 
   def update({:resize, width, height}, state), do: {%{state | width: width, height: height}, []}
@@ -105,10 +121,18 @@ defmodule Epix.Chat.UI do
 
   defp header(state) do
     scrolled = if state.scroll > 0, do: "  [scrolled +#{state.scroll}, End to follow]", else: ""
-    text(clip_pad("Epix — GLM-5.2 @ Berget   (Enter send · Esc quit · PgUp/PgDn scroll)" <> scrolled, state.width), Style.new(fg: :cyan, attrs: [:bold]))
+
+    text(
+      clip_pad(
+        "Epix — GLM-5.2 @ Berget   (Enter send · Esc quit · PgUp/PgDn scroll)" <> scrolled,
+        state.width
+      ),
+      Style.new(fg: :cyan, attrs: [:bold])
+    )
   end
 
-  defp status_line(%{status: :idle} = state), do: text(clip_pad("● idle", state.width), Style.new(fg: :green))
+  defp status_line(%{status: :idle} = state),
+    do: text(clip_pad("● idle", state.width), Style.new(fg: :green))
 
   defp status_line(%{status: status, ticks: ticks} = state) do
     spinner = Enum.at(@spinner, rem(ticks, length(@spinner)))
@@ -116,7 +140,8 @@ defmodule Epix.Chat.UI do
     text(clip_pad("#{spinner} #{status} · #{seconds}s", state.width), Style.new(fg: :yellow))
   end
 
-  defp input_line(state), do: text(clip_pad("> " <> state.input, state.width), Style.new(fg: :green))
+  defp input_line(state),
+    do: text(clip_pad("> " <> state.input, state.width), Style.new(fg: :green))
 
   defp chat_lines(state, width) do
     state.messages
@@ -140,7 +165,9 @@ defmodule Epix.Chat.UI do
 
     pieces
     |> Enum.with_index()
-    |> Enum.map(fn {piece, index} -> {if(index == 0, do: prefix, else: indent) <> piece, style} end)
+    |> Enum.map(fn {piece, index} ->
+      {if(index == 0, do: prefix, else: indent) <> piece, style}
+    end)
   end
 
   # The sidebar log stays one entry per line (truncated, not wrapped) so it reads
@@ -149,11 +176,15 @@ defmodule Epix.Chat.UI do
 
   # --- geometry ---
 
-  defp panel_width(state), do: state.width |> div(3) |> max(16) |> min(40) |> min(max(0, state.width - 12))
+  defp panel_width(state),
+    do: state.width |> div(3) |> max(16) |> min(40) |> min(max(0, state.width - 12))
+
   defp chat_width(state), do: max(10, state.width - panel_width(state) - 1)
   defp body_height(state), do: max(3, state.height - 3)
   defp page(state), do: max(1, body_height(state) - 1)
-  defp max_scroll(state), do: max(0, length(chat_lines(state, chat_width(state))) - body_height(state))
+
+  defp max_scroll(state),
+    do: max(0, length(chat_lines(state, chat_width(state))) - body_height(state))
 
   defp window(lines, body_h, scroll) do
     keep = max(0, length(lines) - scroll)
@@ -168,13 +199,18 @@ defmodule Epix.Chat.UI do
     if String.length(string) <= width do
       [string]
     else
-      [String.slice(string, 0, width) | wrap(String.slice(string, width, String.length(string)), width)]
+      [
+        String.slice(string, 0, width)
+        | wrap(String.slice(string, width, String.length(string)), width)
+      ]
     end
   end
 
   defp wrap(string, _width), do: [string]
 
-  defp clip_pad(string, width) when width > 0, do: string |> String.slice(0, width) |> String.pad_trailing(width)
+  defp clip_pad(string, width) when width > 0,
+    do: string |> String.slice(0, width) |> String.pad_trailing(width)
+
   defp clip_pad(string, _width), do: string
 
   defp drop_last(""), do: ""
@@ -193,6 +229,6 @@ defmodule Epix.Chat.UI do
   defp dispatch_submit(text) do
     %{app: app, controller: controller} = Application.fetch_env!(:epix, :chat)
     Solve.dispatch(app, controller, :submit, %{text: text})
-    true
+    :ok
   end
 end

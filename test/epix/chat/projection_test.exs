@@ -45,7 +45,9 @@ defmodule Epix.Chat.ProjectionTest do
     assert state.log == ["↻ wants tools: lua_eval"]
   end
 
-  test "tool_start and tool_result both log; tool_result also adds a transcript line", %{state: state} do
+  test "tool_start and tool_result both log; tool_result also adds a transcript line", %{
+    state: state
+  } do
     state =
       state
       |> Projection.apply_event({:tool_start, %{name: "lua_eval"}})

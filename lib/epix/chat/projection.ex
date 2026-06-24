@@ -18,7 +18,12 @@ defmodule Epix.Chat.Projection do
   @type role :: :user | :assistant | :activity | :error
   @type message :: %{role: role(), text: String.t()}
   @type status :: :idle | :thinking | :running_tools
-  @type state :: %{messages: [message()], status: status(), log: [String.t()]}
+  @type state :: %{
+          :messages => [message()],
+          :status => status(),
+          :log => [String.t()],
+          optional(any()) => any()
+        }
 
   @log_limit 200
 
