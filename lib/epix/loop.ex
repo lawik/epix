@@ -119,14 +119,28 @@ defmodule Epix.Loop do
     messages |> Enum.reduce(0, fn message, acc -> acc + message_chars(message) end) |> div(4)
   end
 
-  defp message_chars(%{content: content}) when is_list(content) do
-    Enum.reduce(content, 0, fn part, acc -> acc + part_chars(part) end)
+  defp message_chars(%{content: content} = message) when is_list(content) do
+    text = Enum.reduce(content, 0, fn part, acc -> acc + part_chars(part) end)
+    # Tool-call arguments live in the tool_calls field, not content, and are often
+    # the largest payload in an agentic context; count them.
+    text + tool_call_chars(Map.get(message, :tool_calls))
   end
 
   defp message_chars(_message), do: 0
 
   defp part_chars(%{text: text}) when is_binary(text), do: byte_size(text)
   defp part_chars(_part), do: 0
+
+  defp tool_call_chars(calls) when is_list(calls) do
+    Enum.reduce(calls, 0, fn call, acc ->
+      function = Map.get(call, :function, %{})
+
+      acc + byte_size(to_string(Map.get(function, :arguments, ""))) +
+        byte_size(to_string(Map.get(function, :name, "")))
+    end)
+  end
+
+  defp tool_call_chars(_calls), do: 0
 
   @doc """
   Folds tool results back into the context and advances the step.

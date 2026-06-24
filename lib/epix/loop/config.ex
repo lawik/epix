@@ -19,7 +19,8 @@ defmodule Epix.Loop.Config do
             context_window: 128_000,
             compaction_threshold: 0.8,
             tool_execution: :parallel,
-            max_tool_concurrency: 8
+            max_tool_concurrency: 8,
+            max_follow_ups: 8
 
   @type t :: %__MODULE__{
           model: struct() | nil,
@@ -32,6 +33,7 @@ defmodule Epix.Loop.Config do
           context_window: pos_integer(),
           compaction_threshold: float(),
           tool_execution: :parallel | :sequential,
-          max_tool_concurrency: pos_integer()
+          max_tool_concurrency: pos_integer(),
+          max_follow_ups: non_neg_integer()
         }
 end

@@ -89,6 +89,12 @@ defmodule Epix.LoopTest do
       state = init_state() |> Loop.apply_error(:boom)
       assert Loop.result(state) == {:error, :boom}
     end
+
+    test "estimate_tokens counts tool-call arguments, not just text content" do
+      call = tool_call("c1", "lua_eval", String.duplicate("x", 100))
+      # content is [] but the 100-char args + name must be counted (~27 tokens)
+      assert Loop.estimate_tokens([assistant_with_call(call)]) > 20
+    end
   end
 
   describe "Runner.run/4 with fakes" do
@@ -299,6 +305,20 @@ defmodule Epix.LoopTest do
       assert Enum.count(final.context.messages, &(&1.role == :user)) == 2
       assert {:follow_up, %{count: 1}} in Agent.get(collector, &Enum.reverse/1)
     end
+
+    test "follow-up is bounded by max_follow_ups (no infinite loop)" do
+      always = fn -> ["again"] end
+
+      model = fn _ctx, _cfg, _rctx ->
+        {:ok, %Turn{message: assistant_msg(), text: "done", finish_reason: :stop}}
+      end
+
+      {result, final} =
+        Runner.run(init_state(max_follow_ups: 3), model, fn _c, _r -> "" end, follow_up: always)
+
+      assert result == {:ok, "done"}
+      assert final.follow_ups == 3
+    end
   end
 
   describe "compaction" do
@@ -454,6 +474,48 @@ defmodule Epix.LoopTest do
       assert elem(Agent.get(gauge, & &1), 1) == 1
       assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
     end
+
+    test "a raising tool is contained as a tool result, not a crash" do
+      tool = fn _call, _rctx -> raise "kaboom" end
+
+      {result, final} =
+        Runner.run(
+          init_state(tool_execution: :parallel),
+          three_call_model([tool_call("c1", "boom", "{}")]),
+          tool
+        )
+
+      assert result == {:ok, "done"}
+      assert [body] = tool_bodies(final)
+      assert body =~ "Tool crashed"
+    end
+
+    test "cancelling mid-batch skips the remaining tools" do
+      c1 = tool_call("c1", "t1", "{}")
+      c2 = tool_call("c2", "t2", "{}")
+      abort = Abort.new()
+
+      {model, _} =
+        scripted([
+          %Turn{
+            message: %Message{role: :assistant, content: [], tool_calls: [c1, c2]},
+            tool_calls: [c1, c2],
+            finish_reason: :tool_calls
+          },
+          %Turn{message: assistant_msg(), text: "done", finish_reason: :stop}
+        ])
+
+      tool = fn call, rctx ->
+        if call.function.name == "t1", do: Abort.cancel(rctx.abort)
+        "ran #{call.function.name}"
+      end
+
+      {result, final} =
+        Runner.run(init_state(tool_execution: :sequential), model, tool, abort: abort)
+
+      assert result == {:error, :cancelled}
+      assert tool_bodies(final) == ["ran t1", "Tool not run: cancelled"]
+    end
   end
 
   describe "per-turn hooks" do
@@ -534,6 +596,19 @@ defmodule Epix.LoopTest do
 
       assert result == {:ok, "done"}
       assert Agent.get(count, & &1) == 1
+    end
+
+    test "before_tool_call returning an invalid value fails closed (blocks)" do
+      before = fn _call -> :whoops end
+
+      {result, final} =
+        Runner.run(init_state(), tool_then_done("x"), fn _c, _r -> "ran" end,
+          before_tool_call: before
+        )
+
+      assert result == {:ok, "done"}
+      assert [body] = tool_bodies(final)
+      assert body =~ "before_tool_call returned"
     end
   end
 end

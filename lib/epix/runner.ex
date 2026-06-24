@@ -74,15 +74,17 @@ defmodule Epix.Runner do
     end
   end
 
-  # A normally-completed run can be resumed by follow-up messages.
+  # A normally-completed run can be resumed by follow-up messages, bounded by
+  # max_follow_ups so a misbehaving follow-up source cannot loop forever.
   defp step({:halt, {:ok, _} = result, state}, model_fun, tool_fun, rctx, verbose, _emit) do
     case rctx.follow_up.() do
-      [] ->
-        {result, state}
-
-      contents ->
+      contents when contents != [] and state.follow_ups < state.config.max_follow_ups ->
         rctx.emit.({:follow_up, %{count: length(contents)}})
+        state = %{state | follow_ups: state.follow_ups + 1}
         drive(Loop.inject_user(state, contents), model_fun, tool_fun, rctx, verbose)
+
+      _none_or_capped ->
+        {result, state}
     end
   end
 
@@ -136,7 +138,11 @@ defmodule Epix.Runner do
       max_concurrency: config.max_tool_concurrency,
       timeout: :infinity
     )
-    |> Enum.map(fn {:ok, result} -> result end)
+    |> Enum.zip(calls)
+    |> Enum.map(fn
+      {{:ok, result}, _call} -> result
+      {{:exit, reason}, call} -> %{id: call.id, body: "Tool crashed: #{inspect(reason)}"}
+    end)
   end
 
   defp halt_cancelled(state, emit) do
@@ -210,33 +216,55 @@ defmodule Epix.Runner do
   defp overflow?(reason) when is_binary(reason), do: overflow_text?(reason)
   defp overflow?(reason), do: overflow_text?(inspect(reason))
 
+  # Require a subject word and a limit word to co-occur, to avoid misclassifying
+  # an unrelated error that merely mentions "context" or "tokens".
   defp overflow_text?(text) do
     text = String.downcase(text)
+    subject = String.contains?(text, ["context", "prompt", "token"])
 
-    String.contains?(text, [
-      "context length",
-      "context_length",
-      "maximum context",
-      "context window",
-      "too many tokens",
-      "reduce the length"
-    ])
+    limit =
+      String.contains?(text, [
+        "too long",
+        "too many",
+        "maximum",
+        "exceed",
+        "reduce the length",
+        "context_length_exceeded"
+      ])
+
+    subject and limit
   end
 
   defp run_one(call, tool_fun, rctx, verbose) do
     log(verbose, "tool #{call.function.name} #{call.function.arguments}")
     rctx.emit.({:tool_start, %{name: call.function.name}})
-    body = rctx.after_tool_call.(call, run_or_block(call, tool_fun, rctx))
+    body = execute_tool(call, tool_fun, rctx)
     log(verbose, "  -> #{truncate(body)}")
     rctx.emit.({:tool_result, %{name: call.function.name, body: body}})
     %{id: call.id, body: body}
   end
 
-  # before_tool_call can block a tool; the block reason is fed back as the result.
+  # Tool/hook execution is contained: a raise becomes a tool result the model can
+  # see rather than crashing the run/Session. Cancellation is honored per tool.
+  defp execute_tool(call, tool_fun, rctx) do
+    if Abort.cancelled?(rctx.abort) do
+      "Tool not run: cancelled"
+    else
+      rctx.after_tool_call.(call, run_or_block(call, tool_fun, rctx))
+    end
+  rescue
+    exception -> "Tool crashed: #{Exception.message(exception)}"
+  catch
+    kind, reason -> "Tool crashed: #{inspect({kind, reason})}"
+  end
+
+  # before_tool_call must return :ok or {:block, reason}; anything else fails
+  # closed (blocks), so a buggy permission hook never silently allows a tool.
   defp run_or_block(call, tool_fun, rctx) do
     case rctx.before_tool_call.(call) do
+      :ok -> tool_fun.(call, rctx)
       {:block, reason} -> "Tool blocked: #{reason}"
-      _ok -> tool_fun.(call, rctx)
+      other -> "Tool blocked: before_tool_call returned #{inspect(other)}"
     end
   end
 

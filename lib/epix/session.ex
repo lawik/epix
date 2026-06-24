@@ -104,10 +104,16 @@ defmodule Epix.Session do
           :prepare_next_turn
         ])
 
+    # Contain a crashing run (e.g. a raising hook outside tool dispatch) so it
+    # returns an error and the session keeps its conversation rather than dying.
     {result, final} =
       Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)
 
     {:reply, result, %{state | context: final.context}}
+  rescue
+    exception -> {:reply, {:error, {:run_crashed, Exception.message(exception)}}, state}
+  catch
+    kind, reason -> {:reply, {:error, {:run_crashed, {kind, reason}}}, state}
   end
 
   def handle_call(:context, _from, state), do: {:reply, state.context, state}
@@ -298,7 +304,10 @@ defmodule Epix.Session do
   end
 
   defp summarize(messages, config) do
-    transcript = Enum.map_join(messages, "\n", fn m -> "#{m.role}: #{message_text(m)}" end)
+    transcript =
+      messages
+      |> Enum.map_join("\n", fn m -> "#{m.role}: #{message_text(m)}" end)
+      |> cap_transcript()
 
     prompt =
       "Summarize this conversation transcript concisely, preserving key facts, " <>
@@ -311,6 +320,16 @@ defmodule Epix.Session do
          ) do
       {:ok, resp} -> {:ok, Response.text(resp)}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Keep the summarizer prompt bounded so compaction's own model call (which runs
+  # precisely because the context is large) cannot itself overflow the window.
+  defp cap_transcript(text, max_chars \\ 12_000) do
+    if String.length(text) > max_chars do
+      "...(earlier content elided)...\n" <> String.slice(text, -max_chars, max_chars)
+    else
+      text
     end
   end
 

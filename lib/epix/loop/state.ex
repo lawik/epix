@@ -25,7 +25,8 @@ defmodule Epix.Loop.State do
     pending_calls: [],
     result: nil,
     error: nil,
-    stop_reason: nil
+    stop_reason: nil,
+    follow_ups: 0
   ]
 
   @type phase :: :model | :tools | :done
@@ -38,6 +39,7 @@ defmodule Epix.Loop.State do
           pending_calls: [ReqLLM.ToolCall.t()],
           result: String.t() | nil,
           error: term() | nil,
-          stop_reason: atom() | nil
+          stop_reason: atom() | nil,
+          follow_ups: non_neg_integer()
         }
 end
