@@ -21,12 +21,23 @@ defmodule Epix do
   @spec start_session(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_session(opts \\ []), do: Session.start_link(opts)
 
-  @doc "Convenience one-shot: start a session, run one prompt, return the result."
+  @doc """
+  Convenience one-shot: start a session, run one prompt, return the result, and
+  stop the session (and its linked sandbox) so nothing leaks. Use
+  `start_session/1` + `Epix.Session.run/3` to keep a session across turns.
+  """
   @spec run(String.t(), keyword()) :: Epix.Loop.result() | {:error, term()}
   def run(prompt, opts \\ []) do
     case Session.start_link(opts) do
-      {:ok, session} -> Session.run(session, prompt)
-      {:error, reason} -> {:error, reason}
+      {:ok, session} ->
+        try do
+          Session.run(session, prompt)
+        after
+          GenServer.stop(session)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 end

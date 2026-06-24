@@ -9,23 +9,33 @@ defmodule Epix.Runner do
     * `model_fun` - `(context, config, run_ctx) -> {:ok, Turn} | {:error, reason}`
     * `tool_fun` - `(ReqLLM.ToolCall, run_ctx) -> body_text`
 
-  `run_ctx` is `%{emit: emit_fun, abort: Epix.Abort.t()}`: the observability sink
-  (`Epix.Event`) and the cancellation token. Bundling them keeps the effect
-  signatures stable as features are added. Injecting the effects is what makes the
-  whole loop testable offline: pass a fake `model_fun` that returns scripted turns
-  (Pi's faux-provider trick) and a fake `tool_fun`.
+  `run_ctx` carries the observability sink (`emit`, an `Epix.Event` callback), the
+  cancellation token (`abort`), and the driver's injected hooks (steering,
+  follow-up, compaction, and the per-turn hooks). `model_fun`/`tool_fun` use only
+  `emit` and `abort`; the hooks are consumed by the driver itself. Injecting the
+  effects is what makes the whole loop testable offline: pass a fake `model_fun`
+  that returns scripted turns (Pi's faux-provider trick) and a fake `tool_fun`.
 
-  Tool calls are run sequentially. Pi defaults to parallel execution but forces
-  sequential when a tool requires it; our Lua tools mutate shared sandbox state
-  (define then run), which is exactly that case, so sequential is the faithful
-  choice here.
+  Tool calls run in parallel by default (see `Config.tool_execution`), preserving
+  assistant source order; the Session opts into sequential because its Lua tools
+  share the sandbox registry.
   """
 
   alias Epix.{Abort, Event, Loop}
 
   require Logger
 
-  @type run_ctx :: %{emit: Event.emit(), abort: Abort.t()}
+  @type run_ctx :: %{
+          emit: Event.emit(),
+          abort: Abort.t(),
+          steering: (-> [String.t() | list()]),
+          follow_up: (-> [String.t() | list()]),
+          compaction: ([ReqLLM.Message.t()] -> {:ok, [ReqLLM.Message.t()]} | {:error, term()}),
+          transform_context: ([ReqLLM.Message.t()] -> [ReqLLM.Message.t()]),
+          before_tool_call: (ReqLLM.ToolCall.t() -> :ok | {:block, String.t()}),
+          after_tool_call: (ReqLLM.ToolCall.t(), String.t() -> String.t()),
+          prepare_next_turn: (Loop.State.t() -> Loop.State.t())
+        }
   @type model_fun :: (ReqLLM.Context.t(), Loop.Config.t(), run_ctx() ->
                         {:ok, Loop.Turn.t()} | {:error, term()})
   @type tool_fun :: (ReqLLM.ToolCall.t(), run_ctx() -> String.t())

@@ -13,12 +13,10 @@ defmodule Epix.Loop do
   Everything here is a pure function over `Epix.Loop.State`, so the entire loop is
   testable with hand-built turns and no provider.
 
-  Known simplifications vs Pi (each a deliberate seam, not a dead end):
-
-    * the running context is a `ReqLLM.Context` (provider messages) rather than a
-      separate internal message type with custom entries;
-    * steering / follow-up message injection is not modeled yet (Pi's outer loop);
-    * tool calls are surfaced as a batch for the driver to run sequentially.
+  Known simplification vs Pi (a deliberate seam, not a dead end): the running
+  context is a `ReqLLM.Context` (provider messages) rather than a separate internal
+  message type with custom entries. Steering/follow-up injection (`inject_user/2`)
+  and parallel tool execution are modeled; the driver supplies their effects.
   """
 
   alias Epix.Loop.{State, Turn}

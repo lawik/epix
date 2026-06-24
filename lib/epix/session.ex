@@ -4,13 +4,14 @@ defmodule Epix.Session do
 
   Owns the Lua sandbox and the running conversation context, and assembles the
   real effects (the req_llm model call and tool dispatch into the sandbox) that
-  `Epix.Runner` drives. A plain `GenServer` for now. This is the seam where a
-  `Solve` controller could later expose session state (messages, defined tools,
-  running?, usage) to a TUI, GUI, API, or MCP frontend, all of which would
-  observe the same building blocks underneath.
+  `Epix.Runner` drives. A plain `GenServer` for now, exposing `context/1` and
+  `sandbox/1`. This is the seam where a `Solve` controller could later project
+  richer session state to a TUI, GUI, API, or MCP frontend.
 
-  Blocking note: a run occupies the GenServer until it finishes. That is fine for
-  a single session; mid-run steering would move the model call off the call path.
+  Blocking note: a run occupies the GenServer until it finishes (`run/3` is a
+  `:infinity` call), so cancellation/steering must be driven out of band via the
+  `:abort`/`:steering` options rather than a separate call. Moving the run off the
+  call path (a Task + reply-later) is the next step to expose `cancel/1`/`steer/2`.
   """
 
   use GenServer
