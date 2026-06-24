@@ -29,7 +29,7 @@ defmodule Epix.LoopTest do
   defp scripted(turns) do
     {:ok, agent} = Agent.start_link(fn -> turns end)
 
-    fun = fn _context, _config ->
+    fun = fn _context, _config, _rctx ->
       case Agent.get_and_update(agent, fn
              [t | rest] -> {t, rest}
              [] -> {:done, []}
@@ -90,7 +90,7 @@ defmodule Epix.LoopTest do
           %Turn{message: assistant_msg(), text: "the answer is 4", finish_reason: :stop}
         ])
 
-      tool_fun = fn c -> "RESULT(#{c.function.name})" end
+      tool_fun = fn c, _rctx -> "RESULT(#{c.function.name})" end
 
       {result, final} = Runner.run(init_state(), model_fun, tool_fun)
 
@@ -103,11 +103,11 @@ defmodule Epix.LoopTest do
 
     test "stops at max_steps instead of looping forever" do
       call = tool_call("c1", "lua_eval", "{}")
-      always_calls = fn _ctx, _cfg ->
+      always_calls = fn _ctx, _cfg, _rctx ->
         {:ok, %Turn{message: assistant_with_call(call), tool_calls: [call], finish_reason: :tool_calls}}
       end
 
-      tool_fun = fn _c -> "again" end
+      tool_fun = fn _c, _rctx -> "again" end
       state = init_state(max_steps: 2)
 
       {result, final} = Runner.run(state, always_calls, tool_fun)
@@ -129,13 +129,30 @@ defmodule Epix.LoopTest do
       {:ok, collector} = Agent.start_link(fn -> [] end)
       emit = fn event -> Agent.update(collector, &[event | &1]) end
 
-      Runner.run(init_state(), model_fun, fn _ -> "4" end, emit: emit)
+      Runner.run(init_state(), model_fun, fn _c, _rctx -> "4" end, emit: emit)
       events = Agent.get(collector, &Enum.reverse/1)
 
       assert {:status, :thinking} in events
       assert {:status, :running_tools} in events
       assert Enum.any?(events, &match?({:tool_result, %{name: "lua_eval"}}, &1))
       assert Enum.any?(events, &match?({:assistant, %{text: "4"}}, &1))
+    end
+
+    test "model_fun emits text deltas through the run context, in order" do
+      {:ok, collector} = Agent.start_link(fn -> [] end)
+      emit = fn event -> Agent.update(collector, &[event | &1]) end
+
+      streaming_model = fn _ctx, _cfg, rctx ->
+        rctx.emit.({:text_delta, "Hel"})
+        rctx.emit.({:text_delta, "lo"})
+        {:ok, %Turn{message: assistant_msg(), text: "Hello", finish_reason: :stop}}
+      end
+
+      {result, _final} = Runner.run(init_state(), streaming_model, fn _c, _r -> "" end, emit: emit)
+      events = Agent.get(collector, &Enum.reverse/1)
+
+      assert result == {:ok, "Hello"}
+      assert for({:text_delta, t} <- events, do: t) == ["Hel", "lo"]
     end
   end
 end

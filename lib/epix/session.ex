@@ -18,7 +18,7 @@ defmodule Epix.Session do
   alias Epix.{Loop, Model, Runner, SystemPrompt, Tools}
   alias Epix.Loop.{Config, Turn}
   alias Epix.Lua.Sandbox
-  alias ReqLLM.{Context, Response}
+  alias ReqLLM.{Context, Response, StreamResponse}
 
   @type t :: GenServer.server()
 
@@ -100,16 +100,17 @@ defmodule Epix.Session do
   # --- effects (the imperative boundary) ---
 
   defp model_fun(config) do
-    fn context, %Config{} = cfg ->
+    fn context, %Config{} = cfg, rctx ->
       try do
-        case ReqLLM.generate_text(config.model, context,
+        case ReqLLM.stream_text(config.model, context,
                tools: cfg.tools,
                api_key: cfg.api_key,
                temperature: cfg.temperature,
                max_tokens: cfg.max_tokens,
-               receive_timeout: cfg.receive_timeout
+               receive_timeout: cfg.receive_timeout,
+               metadata_timeout: cfg.receive_timeout
              ) do
-          {:ok, resp} -> {:ok, normalize(resp)}
+          {:ok, stream_response} -> consume_stream(stream_response, rctx)
           {:error, reason} -> {:error, reason}
         end
       rescue
@@ -118,18 +119,40 @@ defmodule Epix.Session do
     end
   end
 
+  # Tap the stream once: emit deltas as chunks arrive, then let `to_response`
+  # drive the same tapped stream to build the final turn. Consuming the stream
+  # twice would fail (one-shot HTTP body), so the tap and the build share one pass.
+  defp consume_stream(stream_response, rctx) do
+    tapped = Stream.each(stream_response.stream, &emit_chunk(&1, rctx.emit))
+
+    case StreamResponse.to_response(%{stream_response | stream: tapped}) do
+      {:ok, %Response{} = resp} -> {:ok, normalize(resp)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text), do: emit.({:text_delta, text})
+  defp emit_chunk(%{type: :thinking, text: text}, emit) when is_binary(text), do: emit.({:reasoning_delta, text})
+  defp emit_chunk(_chunk, _emit), do: :ok
+
   defp normalize(%Response{} = resp) do
     %Turn{
       message: resp.message,
       tool_calls: Response.tool_calls(resp),
-      text: Response.text(resp),
+      # A tool-call-only turn has empty content; normalize "" to nil so a
+      # max_steps halt surfaces {:ok, nil} rather than masking it as {:ok, ""}.
+      text: blank_to_nil(Response.text(resp)),
       finish_reason: Response.finish_reason(resp),
       usage: Response.usage(resp)
     }
   end
 
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(text), do: text
+
   defp tool_fun(sandbox) do
-    fn call ->
+    fn call, _rctx ->
       args = decode_args(call.function.arguments)
 
       case Tools.dispatch(call.function.name, args, sandbox) do
