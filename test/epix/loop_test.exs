@@ -455,4 +455,85 @@ defmodule Epix.LoopTest do
       assert tool_bodies(final) == ["t_a", "t_b", "t_c"]
     end
   end
+
+  describe "per-turn hooks" do
+    defp tool_then_done(name) do
+      call = tool_call("c1", name, "{}")
+
+      {model, _} =
+        scripted([
+          %Turn{
+            message: assistant_with_call(call),
+            tool_calls: [call],
+            finish_reason: :tool_calls
+          },
+          %Turn{message: assistant_msg(), text: "done", finish_reason: :stop}
+        ])
+
+      model
+    end
+
+    test "transform_context rewrites the model's messages non-destructively" do
+      {:ok, seen} = Agent.start_link(fn -> nil end)
+
+      model = fn ctx, _cfg, _rctx ->
+        Agent.update(seen, fn _ -> length(ctx.messages) end)
+        {:ok, %Turn{message: assistant_msg(), text: "ok", finish_reason: :stop}}
+      end
+
+      state =
+        Loop.init(Context.new([Context.user("old"), Context.user("new")]), struct(%Config{}, []))
+
+      transform = fn messages -> Enum.take(messages, -1) end
+
+      {result, final} =
+        Runner.run(state, model, fn _c, _r -> "" end, transform_context: transform)
+
+      assert result == {:ok, "ok"}
+      # model saw only the last message; persisted context keeps both + the reply.
+      assert Agent.get(seen, & &1) == 1
+      assert length(final.context.messages) == 3
+    end
+
+    test "before_tool_call can block a tool" do
+      {:ok, ran} = Agent.start_link(fn -> false end)
+      tool = fn _c, _r -> Agent.update(ran, fn _ -> true end) && "ran" end
+
+      before = fn call ->
+        if call.function.name == "danger", do: {:block, "not allowed"}, else: :ok
+      end
+
+      {result, final} =
+        Runner.run(init_state(), tool_then_done("danger"), tool, before_tool_call: before)
+
+      assert result == {:ok, "done"}
+      assert Agent.get(ran, & &1) == false
+      assert tool_bodies(final) == ["Tool blocked: not allowed"]
+    end
+
+    test "after_tool_call transforms the tool result" do
+      after_hook = fn _call, body -> String.upcase(body) end
+
+      {result, final} =
+        Runner.run(init_state(), tool_then_done("echo"), fn _c, _r -> "hello" end,
+          after_tool_call: after_hook
+        )
+
+      assert result == {:ok, "done"}
+      assert tool_bodies(final) == ["HELLO"]
+    end
+
+    test "prepare_next_turn runs once between turns" do
+      {:ok, count} = Agent.start_link(fn -> 0 end)
+      prepare = fn state -> Agent.update(count, &(&1 + 1)) && state end
+
+      {result, _final} =
+        Runner.run(init_state(), tool_then_done("t"), fn _c, _r -> "x" end,
+          prepare_next_turn: prepare
+        )
+
+      assert result == {:ok, "done"}
+      assert Agent.get(count, & &1) == 1
+    end
+  end
 end

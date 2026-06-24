@@ -49,7 +49,11 @@ defmodule Epix.Runner do
       abort: Keyword.get(opts, :abort) || Abort.new(),
       steering: Keyword.get(opts, :steering, &no_messages/0),
       follow_up: Keyword.get(opts, :follow_up, &no_messages/0),
-      compaction: Keyword.get(opts, :compaction, &default_compaction/1)
+      compaction: Keyword.get(opts, :compaction, &default_compaction/1),
+      transform_context: Keyword.get(opts, :transform_context, &Function.identity/1),
+      before_tool_call: Keyword.get(opts, :before_tool_call, &default_before_tool/1),
+      after_tool_call: Keyword.get(opts, :after_tool_call, &default_after_tool/2),
+      prepare_next_turn: Keyword.get(opts, :prepare_next_turn, &Function.identity/1)
     }
 
     drive(state, model_fun, tool_fun, rctx, Keyword.get(opts, :verbose, false))
@@ -57,6 +61,8 @@ defmodule Epix.Runner do
 
   defp no_messages(), do: []
   defp default_compaction(messages), do: {:ok, messages}
+  defp default_before_tool(_call), do: :ok
+  defp default_after_tool(_call, body), do: body
 
   defp drive(state, model_fun, tool_fun, rctx, verbose) do
     # A set cancellation token wins, even on a run-completing turn (the cancel
@@ -112,7 +118,9 @@ defmodule Epix.Runner do
   defp step({:run_tools, calls, state}, model_fun, tool_fun, rctx, verbose, emit) do
     emit.({:status, :running_tools})
     results = run_tools(calls, tool_fun, rctx, verbose, state.config)
-    drive(Loop.apply_tool_results(state, results), model_fun, tool_fun, rctx, verbose)
+    # prepare_next_turn can swap the model/context between turns.
+    state = state |> Loop.apply_tool_results(results) |> rctx.prepare_next_turn.()
+    drive(state, model_fun, tool_fun, rctx, verbose)
   end
 
   defp run_tools(calls, tool_fun, rctx, verbose, %{tool_execution: :sequential}) do
@@ -176,8 +184,12 @@ defmodule Epix.Runner do
   end
 
   # Call the model, recovering from a context overflow by compacting and retrying.
+  # `transform_context` rewrites the messages sent to the model non-destructively;
+  # the persisted state.context is unchanged (apply_turn appends to the original).
   defp call_model(state, model_fun, rctx, retries) do
-    case model_fun.(state.context, state.config, rctx) do
+    send_context = %{state.context | messages: rctx.transform_context.(state.context.messages)}
+
+    case model_fun.(send_context, state.config, rctx) do
       {:ok, turn} ->
         {:ok, turn, state}
 
@@ -214,10 +226,18 @@ defmodule Epix.Runner do
   defp run_one(call, tool_fun, rctx, verbose) do
     log(verbose, "tool #{call.function.name} #{call.function.arguments}")
     rctx.emit.({:tool_start, %{name: call.function.name}})
-    body = tool_fun.(call, rctx)
+    body = rctx.after_tool_call.(call, run_or_block(call, tool_fun, rctx))
     log(verbose, "  -> #{truncate(body)}")
     rctx.emit.({:tool_result, %{name: call.function.name, body: body}})
     %{id: call.id, body: body}
+  end
+
+  # before_tool_call can block a tool; the block reason is fed back as the result.
+  defp run_or_block(call, tool_fun, rctx) do
+    case rctx.before_tool_call.(call) do
+      {:block, reason} -> "Tool blocked: #{reason}"
+      _ok -> tool_fun.(call, rctx)
+    end
   end
 
   defp summarize(turn) do

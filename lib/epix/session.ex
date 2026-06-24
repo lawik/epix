@@ -92,7 +92,17 @@ defmodule Epix.Session do
       [
         verbose: state.verbose,
         compaction: Keyword.get(opts, :compaction, compaction_fun(config))
-      ] ++ Keyword.take(opts, [:emit, :abort, :steering, :follow_up])
+      ] ++
+        Keyword.take(opts, [
+          :emit,
+          :abort,
+          :steering,
+          :follow_up,
+          :transform_context,
+          :before_tool_call,
+          :after_tool_call,
+          :prepare_next_turn
+        ])
 
     {result, final} =
       Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)
