@@ -16,10 +16,10 @@ defmodule Epix.Session do
 
   use GenServer
 
-  alias Epix.{Abort, Loop, Model, Runner, SystemPrompt, Tools}
-  alias Epix.Loop.{Config, Turn}
+  alias Epix.{Compaction, Loop, Model, ModelStream, Runner, SystemPrompt, Tools}
+  alias Epix.Loop.Config
   alias Epix.Lua.Sandbox
-  alias ReqLLM.{Context, Response, StreamResponse}
+  alias ReqLLM.{Context, Response}
 
   @type t :: GenServer.server()
 
@@ -124,135 +124,21 @@ defmodule Epix.Session do
 
   defp model_fun(config) do
     fn context, %Config{} = cfg, rctx ->
-      isolated_call(fn -> stream_call(config, cfg, context, rctx) end, rctx.abort)
+      ModelStream.run(fn -> request(config, cfg, context) end, rctx)
     end
   end
 
-  defp stream_call(config, cfg, context, rctx) do
-    case ReqLLM.stream_text(config.model, context,
-           tools: cfg.tools,
-           api_key: cfg.api_key,
-           temperature: cfg.temperature,
-           max_tokens: cfg.max_tokens,
-           receive_timeout: cfg.receive_timeout
-         ) do
-      {:ok, stream_response} -> consume_stream(stream_response, rctx)
-      {:error, reason} -> {:error, reason}
-    end
+  defp request(config, cfg, context) do
+    ReqLLM.stream_text(config.model, context,
+      tools: cfg.tools,
+      api_key: cfg.api_key,
+      temperature: cfg.temperature,
+      max_tokens: cfg.max_tokens,
+      receive_timeout: cfg.receive_timeout
+    )
   rescue
     exception -> {:error, Exception.message(exception)}
   end
-
-  # Run the model call in an isolated, monitored (unlinked) process so the
-  # provider's StreamServer/MetadataHandle link to *it*, not the Session. Once the
-  # result is in hand the worker is killed, tearing those down (no per-call leak);
-  # a cancellation kills it mid-stream, aborting the in-flight HTTP request.
-  defp isolated_call(fun, abort) do
-    parent = self()
-
-    {worker, ref} =
-      spawn_monitor(fn ->
-        # Exit if the Session dies mid-call so the worker (and the provider
-        # processes linked to it) are not orphaned.
-        parent_ref = Process.monitor(parent)
-        send(parent, {:model_done, self(), fun.()})
-
-        receive do
-          :stop -> :ok
-          {:DOWN, ^parent_ref, :process, ^parent, _reason} -> :ok
-        after
-          30_000 -> :ok
-        end
-      end)
-
-    result = await_isolated(worker, ref, abort)
-    Process.exit(worker, :kill)
-    Process.demonitor(ref, [:flush])
-    # The worker may have sent its result in the cancel race window; drop it so it
-    # does not linger in the Session mailbox.
-    receive do
-      {:model_done, ^worker, _} -> :ok
-    after
-      0 -> :ok
-    end
-
-    result
-  end
-
-  defp await_isolated(worker, ref, abort) do
-    receive do
-      {:model_done, ^worker, result} -> result
-      {:DOWN, ^ref, :process, ^worker, reason} -> {:error, {:model_crashed, reason}}
-    after
-      50 ->
-        if Abort.cancelled?(abort),
-          do: {:error, :cancelled},
-          else: await_isolated(worker, ref, abort)
-    end
-  end
-
-  # Tap the stream once: emit deltas as chunks arrive, then let `to_response`
-  # drive the same tapped stream to build the final turn. Consuming the stream
-  # twice would fail (one-shot HTTP body), so the tap and the build share one pass.
-  #
-  # The tap also checks the abort token per chunk: on cancellation it calls the
-  # stream's own `cancel` for a graceful teardown (no killed-process log) and
-  # throws past `to_response` (whose catch only handles `:exit`, not `:throw`).
-  # As a backstop that does not depend on that dep detail, the token is re-checked
-  # after `to_response` returns and any result is normalized to `:cancelled`.
-  defp consume_stream(stream_response, rctx) do
-    tapped =
-      Stream.each(stream_response.stream, fn chunk ->
-        if Abort.cancelled?(rctx.abort) do
-          safe_cancel(stream_response)
-          throw(:epix_cancelled)
-        end
-
-        emit_chunk(chunk, rctx.emit)
-      end)
-
-    result =
-      case StreamResponse.to_response(%{stream_response | stream: tapped}) do
-        {:ok, %Response{} = resp} -> {:ok, normalize(resp)}
-        {:error, reason} -> {:error, reason}
-      end
-
-    if Abort.cancelled?(rctx.abort), do: {:error, :cancelled}, else: result
-  catch
-    :throw, :epix_cancelled -> {:error, :cancelled}
-  end
-
-  # The stream's cancel is a GenServer.call; if the server already stopped it
-  # raises an exit, which we swallow so cancellation still reports as cancelled.
-  defp safe_cancel(stream_response) do
-    stream_response.cancel.()
-  catch
-    :exit, _ -> :ok
-  end
-
-  defp emit_chunk(%{type: :content, text: text}, emit) when is_binary(text),
-    do: emit.({:text_delta, text})
-
-  defp emit_chunk(%{type: :thinking, text: text}, emit) when is_binary(text),
-    do: emit.({:reasoning_delta, text})
-
-  defp emit_chunk(_chunk, _emit), do: :ok
-
-  defp normalize(%Response{} = resp) do
-    %Turn{
-      message: resp.message,
-      tool_calls: Response.tool_calls(resp),
-      # A tool-call-only turn has empty content; normalize "" to nil so a
-      # max_steps halt surfaces {:ok, nil} rather than masking it as {:ok, ""}.
-      text: blank_to_nil(Response.text(resp)),
-      finish_reason: Response.finish_reason(resp),
-      usage: Response.usage(resp)
-    }
-  end
-
-  defp blank_to_nil(nil), do: nil
-  defp blank_to_nil(""), do: nil
-  defp blank_to_nil(text), do: text
 
   defp tool_fun(sandbox) do
     fn call, _rctx ->
@@ -265,43 +151,10 @@ defmodule Epix.Session do
     end
   end
 
-  # Compaction strategy: keep the system message and the current turn (from the
-  # last user message), summarizing the older complete turns into one message. The
-  # last-user boundary avoids splitting an assistant tool-call from its results.
+  # Compaction is the pure `Epix.Compaction` strategy with a model-backed
+  # summarizer injected (kept here because it is a real provider effect).
   defp compaction_fun(config) do
-    fn messages ->
-      {system, rest} = pop_system(messages)
-      compact_messages(messages, system, split_at_last_user(rest), config)
-    end
-  end
-
-  defp compact_messages(messages, _system, {[], _recent}, _config), do: {:ok, messages}
-
-  defp compact_messages(_messages, system, {old, recent}, config) do
-    case summarize(old, config) do
-      {:ok, text} ->
-        summary = Context.user("[Summary of earlier conversation]\n" <> text)
-        {:ok, system ++ [summary | recent]}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp pop_system([%{role: :system} = system | rest]), do: {[system], rest}
-  defp pop_system(messages), do: {[], messages}
-
-  defp split_at_last_user(messages) do
-    last_user =
-      messages
-      |> Enum.with_index()
-      |> Enum.filter(fn {message, _index} -> message.role == :user end)
-      |> List.last()
-
-    case last_user do
-      nil -> {messages, []}
-      {_message, index} -> Enum.split(messages, index)
-    end
+    Compaction.strategy(fn old -> summarize(old, config) end)
   end
 
   defp summarize(messages, config) do
@@ -343,9 +196,13 @@ defmodule Epix.Session do
 
   defp message_text(_message), do: ""
 
-  defp decode_args(json) when json in [nil, ""], do: %{}
+  @doc false
+  # Tool arguments arrive as a JSON string; malformed/empty defaults to an empty
+  # map so a bad model emission degrades to a missing-arg error, not a crash.
+  @spec decode_args(String.t() | nil) :: map()
+  def decode_args(json) when json in [nil, ""], do: %{}
 
-  defp decode_args(json) do
+  def decode_args(json) do
     case Jason.decode(json) do
       {:ok, %{} = map} -> map
       _ -> %{}

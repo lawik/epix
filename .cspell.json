@@ -29,6 +29,7 @@
     "envrc",
     "SIGWINCH",
     "Luerl",
+    "LLMDB",
     "rctx",
     "effectful",
     "unencodable",
