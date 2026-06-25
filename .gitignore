@@ -25,3 +25,6 @@ epix-*.tar
 # Local env with secrets (EPIX_API_KEY etc.)
 .envrc
 
+
+# Downloaded benchmark datasets (resolved by bench/injection_eval.exs).
+/bench/data/

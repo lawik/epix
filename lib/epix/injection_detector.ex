@@ -31,8 +31,9 @@ defmodule Epix.InjectionDetector do
   caller can decide whether to fail open or closed.
 
   Like the rest of the library core, this reads no global configuration: the
-  model stage takes `:model`/`:api_key` from its options (a dev tool or test can
-  splat `Epix.Model.from_env/0`).
+  model stage takes `:model`/`:api_key` from its options. The guard's model is
+  decoupled from the agent's — point it at a small, fast model by splatting
+  `Epix.Model.detector_from_env/0` (sources `EPIX_DETECTOR_*`).
 
   This is a first, deliberately-simple pass. The heuristics will have both false
   positives and false negatives; the model stage is itself injectable. Hardening
@@ -185,7 +186,8 @@ defmodule Epix.InjectionDetector do
 
   Options:
 
-    * `:model`           — a req_llm model; required to reach a provider
+    * `:model`           — a req_llm model; required to reach a provider (splat
+      `Epix.Model.detector_from_env/0` to use the decoupled `EPIX_DETECTOR_*`)
     * `:api_key`         — provider API key
     * `:max_tokens`      — response cap (default 256)
     * `:receive_timeout` — per-request HTTP timeout in ms (default 30_000)

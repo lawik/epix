@@ -78,4 +78,38 @@ defmodule Epix.Model do
   """
   @spec from_env() :: keyword()
   def from_env, do: [model: default(), api_key: api_key()]
+
+  @doc """
+  A `[model:, api_key:]` keyword for the **injection detector**, decoupled from
+  the agent's own model.
+
+  The guard (`Epix.InjectionDetector`) runs synchronously over fetched content,
+  so it wants a small, fast model — not necessarily the capable one the agent
+  reasons with. This sources that model from a parallel set of variables, each
+  falling back to the agent's when unset:
+
+    * `EPIX_DETECTOR_MODEL`    (falls back to `EPIX_MODEL`)
+    * `EPIX_DETECTOR_BASE_URL` (falls back to `EPIX_BASE_URL`)
+    * `EPIX_DETECTOR_API_KEY`  (falls back to `EPIX_API_KEY`)
+
+  So setting only `EPIX_DETECTOR_MODEL` points the guard at a cheap model on the
+  same gateway/key. Like `from_env/0`, this is a boundary convenience: the
+  detector reads no environment itself.
+
+      Epix.InjectionDetector.detect(text, Epix.Model.detector_from_env())
+  """
+  @spec detector_from_env() :: keyword()
+  def detector_from_env do
+    spec =
+      System.get_env("EPIX_DETECTOR_MODEL") || System.get_env("EPIX_MODEL") ||
+        raise """
+        No detector model configured. Set EPIX_DETECTOR_MODEL (or EPIX_MODEL) to a \
+        req_llm model spec — ideally a small, fast model to gate fetched content — \
+        optionally with EPIX_DETECTOR_BASE_URL, or pass `:model` to the detector.
+        """
+
+    base_url = System.get_env("EPIX_DETECTOR_BASE_URL") || System.get_env("EPIX_BASE_URL")
+    key = System.get_env("EPIX_DETECTOR_API_KEY") || System.get_env("EPIX_API_KEY")
+    [model: model(spec, base_url), api_key: key]
+  end
 end

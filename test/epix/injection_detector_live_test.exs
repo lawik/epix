@@ -2,9 +2,11 @@ defmodule Epix.InjectionDetectorLiveTest do
   @moduledoc """
   Exercises the model-based stage against a *real* provider.
 
-  Excluded from the default run (see `test_helper.exs`). Run with a real model:
+  Excluded from the default run (see `test_helper.exs`). Run with a real model;
+  the guard uses the decoupled `EPIX_DETECTOR_*` config (falling back to `EPIX_*`):
 
-      EPIX_MODEL=anthropic:claude-haiku-4-5 EPIX_API_KEY=... \\
+      EPIX_DETECTOR_MODEL=openai:mistralai/Mistral-Small-3.2-24B-Instruct-2506 \\
+      EPIX_API_KEY=... EPIX_BASE_URL=... \\
         mix test --include llm_live
 
   These assertions describe behaviour we want from a competent model; a weak or
@@ -43,10 +45,11 @@ defmodule Epix.InjectionDetectorLiveTest do
     "The hiking trail is six kilometres long with a gentle elevation gain."
   ]
 
-  # The library core reads no global config, so we source the model/key from the
-  # environment here at the boundary, exactly as a dev tool would.
+  # The library core reads no global config, so we source the guard's model/key
+  # from the environment here at the boundary, exactly as a dev tool would. The
+  # detector model is decoupled from the agent's (EPIX_DETECTOR_*).
   setup do
-    %{opts: Epix.Model.from_env()}
+    %{opts: Epix.Model.detector_from_env()}
   end
 
   describe "model_detect/2 against a live model" do
