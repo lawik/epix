@@ -1,0 +1,186 @@
+# Basic web UI for an Epix agent, as a single self-contained script.
+#
+# It installs Epix as a path dependency and uses phoenix_playground to run a
+# LiveView — so none of the web/Phoenix deps end up in the Epix project itself.
+# The page tracks the Solve controller's exposed state (the conversation + a
+# background activity log) and sends prompts back through Solve.dispatch.
+#
+#   source .envrc && elixir examples/basic-web.exs     # needs EPIX_MODEL / EPIX_API_KEY
+#
+# then open http://localhost:4000
+
+Mix.install([
+  {:epix, path: Path.expand("..", __DIR__)},
+  {:phoenix_playground, "~> 0.1"}
+])
+
+defmodule BasicWeb.Live do
+  use Phoenix.LiveView
+
+  alias Solve.{Message, Update}
+
+  @impl true
+  def mount(_params, _session, socket) do
+    socket = assign(socket, app: nil, messages: [], status: :idle, log: [], input: "")
+
+    if connected?(socket) do
+      # One Epix session per browser connection, linked to this LiveView process
+      # so it is torn down when the tab closes.
+      {:ok, app} = Epix.Chat.App.start_link(params: %{session_opts: session_opts()})
+      exposed = Solve.subscribe(app, :chat, self())
+
+      {:ok, assign(socket, app: app, messages: exposed.messages, status: exposed.status, log: exposed.log)}
+    else
+      {:ok, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("change", %{"text" => text}, socket) do
+    {:noreply, assign(socket, input: text)}
+  end
+
+  def handle_event("submit", %{"text" => text}, socket) do
+    text = String.trim(text)
+
+    if socket.assigns.app && socket.assigns.status == :idle && text != "" do
+      Solve.dispatch(socket.assigns.app, :chat, :submit, %{text: text})
+      {:noreply, assign(socket, input: "")}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # Solve pushes the controller's exposed state on every change.
+  @impl true
+  def handle_info(%Message{type: :update, payload: %Update{exposed_state: exposed}}, socket) do
+    {:noreply, assign(socket, messages: exposed.messages, status: exposed.status, log: exposed.log)}
+  end
+
+  def handle_info(_other, socket), do: {:noreply, socket}
+
+  defp session_opts do
+    Epix.Model.from_env()
+  rescue
+    _ -> []
+  end
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <div class="app">
+      <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        .app {
+          position: fixed; inset: 0;
+          display: flex; flex-direction: column;
+          font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+          color: #0f172a; background: #f8fafc;
+        }
+        .topbar {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 12px 18px; background: #0f172a; color: #f8fafc;
+        }
+        .topbar .title { font-weight: 600; letter-spacing: .02em; }
+        .status { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; text-transform: capitalize; color: #cbd5e1; }
+        .status .dot { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
+        .status-idle .dot { background: #22c55e; }
+        .status-thinking .dot { background: #f59e0b; animation: pulse 1s ease-in-out infinite; }
+        .status-running_tools .dot { background: #3b82f6; animation: pulse 1s ease-in-out infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+        .body { flex: 1; display: flex; min-height: 0; }
+
+        .chat {
+          flex: 1; min-width: 0; overflow-y: auto;
+          display: flex; flex-direction: column-reverse;
+          padding: 18px; gap: 12px;
+        }
+        .empty { margin: auto; color: #94a3b8; font-size: 14px; }
+        .msg {
+          max-width: 760px; padding: 10px 14px; border-radius: 10px;
+          border: 1px solid #e2e8f0; background: #fff; line-height: 1.45;
+        }
+        .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #94a3b8; margin-bottom: 3px; }
+        .msg .text { white-space: pre-wrap; word-wrap: break-word; }
+        .msg-user { align-self: flex-end; background: #eff6ff; border-color: #bfdbfe; }
+        .msg-user .role { color: #3b82f6; }
+        .msg-assistant { align-self: flex-start; }
+        .msg-activity { align-self: flex-start; max-width: 100%; background: transparent; border: 0; padding: 2px 4px; color: #64748b; font-size: 13px; }
+        .msg-activity .role { display: none; }
+        .msg-error { align-self: flex-start; background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+        .msg-error .role { color: #ef4444; }
+
+        .log {
+          width: 340px; flex-shrink: 0; overflow-y: auto;
+          display: flex; flex-direction: column-reverse;
+          padding: 14px; background: #0f172a; color: #cbd5e1;
+          font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+        }
+        .log-line { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.05); white-space: pre-wrap; word-break: break-word; }
+        .log-title { position: sticky; bottom: 0; }
+
+        .composer { display: flex; gap: 10px; padding: 12px 14px; background: #fff; border-top: 1px solid #e2e8f0; }
+        .input {
+          flex: 1; padding: 11px 14px; font-size: 15px; font-family: inherit;
+          border: 1px solid #cbd5e1; border-radius: 9px; outline: none;
+        }
+        .input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
+        .send {
+          padding: 0 20px; font-size: 14px; font-weight: 600; color: #fff;
+          background: #3b82f6; border: 0; border-radius: 9px; cursor: pointer;
+        }
+        .send:disabled { background: #94a3b8; cursor: not-allowed; }
+      </style>
+
+      <header class="topbar">
+        <span class="title">Epix · basic web</span>
+        <span class={"status status-#{@status}"}><span class="dot"></span><%= @status %></span>
+      </header>
+
+      <div class="body">
+        <main class="chat">
+          <%= if @messages == [] do %>
+            <p class="empty">Ask the agent something to get started.</p>
+          <% end %>
+          <%= for m <- Enum.reverse(@messages) do %>
+            <div class={"msg msg-#{m.role}"}>
+              <div class="role"><%= role_label(m.role) %></div>
+              <div class="text"><%= m.text %></div>
+            </div>
+          <% end %>
+        </main>
+
+        <aside class="log">
+          <%= for line <- Enum.reverse(@log) do %>
+            <div class="log-line"><%= line %></div>
+          <% end %>
+          <div class="log-title">activity</div>
+        </aside>
+      </div>
+
+      <form class="composer" phx-submit="submit" phx-change="change">
+        <input
+          class="input"
+          type="text"
+          name="text"
+          value={@input}
+          autocomplete="off"
+          placeholder="Message the agent…"
+        />
+        <button class="send" type="submit" disabled={@status != :idle}>Send</button>
+      </form>
+    </div>
+    """
+  end
+
+  defp role_label(:user), do: "you"
+  defp role_label(:assistant), do: "agent"
+  defp role_label(:error), do: "error"
+  defp role_label(_other), do: ""
+end
+
+# live_reload re-evaluates this whole script on changes, which would re-run
+# Mix.install and re-`defmodule` — so it is off here; edit and restart instead.
+PhoenixPlayground.start(live: BasicWeb.Live, live_reload: false)
