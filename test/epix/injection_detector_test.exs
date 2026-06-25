@@ -201,7 +201,7 @@ defmodule Epix.InjectionDetectorTest do
       Detector.model_detect("anything", generate: generate)
 
       assert_received {:opts, opts}
-      assert opts[:temperature] == 0
+      assert opts[:temperature] == 0.0
       assert opts[:tool_choice] == :required
       assert [%ReqLLM.Tool{name: "prompt_detected"}] = opts[:tools]
       assert is_integer(opts[:max_tokens])

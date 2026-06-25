@@ -30,6 +30,10 @@ defmodule Epix.InjectionDetector do
   `{:error, {:detector_unavailable, reason}}` — distinct from a detection — so a
   caller can decide whether to fail open or closed.
 
+  Like the rest of the library core, this reads no global configuration: the
+  model stage takes `:model`/`:api_key` from its options (a dev tool or test can
+  splat `Epix.Model.from_env/0`).
+
   This is a first, deliberately-simple pass. The heuristics will have both false
   positives and false negatives; the model stage is itself injectable. Hardening
   both is tracked separately.
@@ -120,7 +124,8 @@ defmodule Epix.InjectionDetector do
     * `:run_model` — skip the model stage when `false` (heuristics only).
       Defaults to `true`.
     * any option accepted by `model_detect/2` (`:model`, `:api_key`,
-      `:max_tokens`, …) is forwarded to it.
+      `:max_tokens`, …) is forwarded to it. The model stage needs `:model`
+      explicitly; a dev tool or test can splat `Epix.Model.from_env/0`.
   """
   @spec detect(String.t(), keyword()) :: result()
   def detect(text, opts \\ []) when is_binary(text) do
@@ -174,10 +179,14 @@ defmodule Epix.InjectionDetector do
   `{:error, {:detector_unavailable, reason}}` when the call itself fails (so a
   provider outage is not silently read as "clean").
 
+  Like the rest of the library core, this reads no global configuration: the
+  caller passes `:model` (and `:api_key`) explicitly. A dev tool or test can
+  splat `Epix.Model.from_env/0` to source them from `EPIX_*`.
+
   Options:
 
-    * `:model`           — a req_llm model (defaults to `Epix.Model.default/0`)
-    * `:api_key`         — defaults to `Epix.Model.api_key/0`
+    * `:model`           — a req_llm model; required to reach a provider
+    * `:api_key`         — provider API key
     * `:max_tokens`      — response cap (default 256)
     * `:receive_timeout` — per-request HTTP timeout in ms (default 30_000)
     * `:generate`        — (testing) a `(model, context, keyword) -> {:ok,
@@ -186,8 +195,8 @@ defmodule Epix.InjectionDetector do
   """
   @spec model_detect(String.t(), keyword()) :: result()
   def model_detect(text, opts \\ []) when is_binary(text) do
-    model = opts[:model] || Epix.Model.default()
-    api_key = opts[:api_key] || Epix.Model.api_key()
+    model = opts[:model]
+    api_key = opts[:api_key]
     generate = opts[:generate] || (&ReqLLM.generate_text/3)
 
     context =
@@ -200,7 +209,7 @@ defmodule Epix.InjectionDetector do
       tools: [detect_tool()],
       tool_choice: :required,
       api_key: api_key,
-      temperature: 0,
+      temperature: 0.0,
       max_tokens: Keyword.get(opts, :max_tokens, 256),
       receive_timeout: Keyword.get(opts, :receive_timeout, 30_000)
     ]
