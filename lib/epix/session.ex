@@ -15,7 +15,7 @@ defmodule Epix.Session do
 
   use GenServer
 
-  alias Epix.{Abort, Compaction, Loop, Model, ModelStream, Runner, SystemPrompt, Tools}
+  alias Epix.{Abort, Compaction, Loop, ModelStream, Runner, SystemPrompt, Tools}
   alias Epix.Loop.Config
   alias Epix.Lua.Sandbox
   alias ReqLLM.{Context, Response}
@@ -102,13 +102,14 @@ defmodule Epix.Session do
   end
 
   # Numeric/threshold defaults come from the Config struct; opts override them.
-  # Here we only supply the runtime-computed defaults (model/api_key/tools) and
-  # override tool_execution to :sequential, because the Lua tools share the
-  # sandbox registry (define then run); callers can opt into :parallel.
+  # The model and api_key are NOT defaulted here: a session reads no global
+  # configuration, so the caller passes them explicitly (a dev tool or test can
+  # source them from the environment via `Epix.Model.from_env/0`). We only supply
+  # the built-in tool set and override tool_execution to :sequential, because the
+  # Lua tools share the sandbox registry (define then run); callers can opt into
+  # :parallel.
   defp build_config(opts) do
     opts
-    |> Keyword.put_new_lazy(:model, &Model.default/0)
-    |> Keyword.put_new_lazy(:api_key, &Model.api_key/0)
     |> Keyword.put_new_lazy(:tools, &Tools.specs/0)
     |> Keyword.put_new(:tool_execution, :sequential)
     |> then(&struct(Config, &1))

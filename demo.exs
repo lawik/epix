@@ -2,7 +2,7 @@
 # Run: source .envrc && mix run demo.exs
 Logger.configure(level: :info)
 
-{:ok, session} = Epix.start_session(verbose: true)
+{:ok, session} = Epix.start_session([verbose: true] ++ Epix.Model.from_env())
 
 prompt =
   "Define a reusable Lua tool named `triple` that triples a number using host.add " <>

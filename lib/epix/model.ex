@@ -12,9 +12,11 @@ defmodule Epix.Model do
                         gateways (kept off the spec so any provider/id resolves)
     * `EPIX_API_KEY`  — the API key (`api_key/0`)
 
-  Epix picks no vendor on your behalf: with nothing configured, `default/0`
-  raises. Callers that manage their own model and credentials can bypass the
-  environment entirely and pass `:model`/`:api_key` straight to `Epix.Session`.
+  These helpers (`default/0`, `api_key/0`, `from_env/0`) read the environment so
+  callers don't scatter `System.get_env` around — but they are a boundary
+  convenience for dev tools and tests. The library core (`Epix.Session`) never
+  reads the environment; it takes `:model`/`:api_key` explicitly. With nothing
+  configured, `default/0` raises rather than assuming a vendor.
   """
 
   @doc """
@@ -63,4 +65,17 @@ defmodule Epix.Model do
   @doc "The API key from the `EPIX_API_KEY` environment variable."
   @spec api_key() :: String.t() | nil
   def api_key, do: System.get_env("EPIX_API_KEY")
+
+  @doc """
+  A `[model:, api_key:]` keyword built from the `EPIX_*` environment, ready to
+  splat into `Epix.Session.start_link/1`.
+
+  The boundary convenience for dev tools and tests: the session never reads the
+  environment, so something has to turn `EPIX_*` into explicit options — this
+  does. Raises (via `default/0`) when `EPIX_MODEL` is unset.
+
+      Epix.start_session([verbose: true] ++ Epix.Model.from_env())
+  """
+  @spec from_env() :: keyword()
+  def from_env, do: [model: default(), api_key: api_key()]
 end
