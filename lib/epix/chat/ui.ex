@@ -21,12 +21,21 @@ defmodule Epix.Chat.UI do
   alias TermUI.Event
   alias TermUI.Renderer.Style
 
-  @tick_ms 250
   @spinner ~w(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
   @impl true
   def init(_opts) do
-    %{input: "", messages: [], status: :idle, log: [], ticks: 0, scroll: 0, width: 80, height: 24}
+    %{
+      input: "",
+      messages: [],
+      status: :idle,
+      log: [],
+      ticks: 0,
+      tick_ms: 250,
+      scroll: 0,
+      width: 80,
+      height: 24
+    }
   end
 
   @impl true
@@ -74,8 +83,10 @@ defmodule Epix.Chat.UI do
      }, []}
   end
 
-  def update(:tick, %{status: :idle} = state), do: {state, []}
-  def update(:tick, state), do: {%{state | ticks: state.ticks + 1}, []}
+  def update({:tick, _interval}, %{status: :idle} = state), do: {state, []}
+
+  def update({:tick, interval}, state),
+    do: {%{state | ticks: state.ticks + 1, tick_ms: interval}, []}
 
   def update(:scroll_up, state),
     do: {%{state | scroll: min(max_scroll(state), state.scroll + page(state))}, []}
@@ -136,7 +147,7 @@ defmodule Epix.Chat.UI do
 
   defp status_line(%{status: status, ticks: ticks} = state) do
     spinner = Enum.at(@spinner, rem(ticks, length(@spinner)))
-    seconds = div(ticks * @tick_ms, 1000)
+    seconds = div(ticks * state.tick_ms, 1000)
     text(clip_pad("#{spinner} #{status} · #{seconds}s", state.width), Style.new(fg: :yellow))
   end
 

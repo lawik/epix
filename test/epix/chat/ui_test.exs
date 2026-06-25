@@ -11,6 +11,7 @@ defmodule Epix.Chat.UITest do
       status: :idle,
       log: [],
       ticks: 0,
+      tick_ms: 250,
       scroll: 0,
       width: 80,
       height: 24
@@ -33,9 +34,11 @@ defmodule Epix.Chat.UITest do
     assert {^s, []} = UI.update(:submit, s)
   end
 
-  test "tick advances only while busy" do
-    assert up(:tick, state(%{status: :idle, ticks: 0})).ticks == 0
-    assert up(:tick, state(%{status: :thinking, ticks: 0})).ticks == 1
+  test "tick advances only while busy and records the interval" do
+    assert up({:tick, 250}, state(%{status: :idle, ticks: 0})).ticks == 0
+    busy = up({:tick, 200}, state(%{status: :thinking, ticks: 0}))
+    assert busy.ticks == 1
+    assert busy.tick_ms == 200
   end
 
   test "resize updates dimensions" do

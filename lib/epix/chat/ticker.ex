@@ -22,7 +22,8 @@ defmodule Epix.Chat.Ticker do
 
   @impl true
   def handle_info(:tick, state) do
-    TermUI.Runtime.send_message(state.runtime, :root, :tick)
+    # Carry the interval so the UI derives elapsed time from one source of truth.
+    TermUI.Runtime.send_message(state.runtime, :root, {:tick, state.interval})
     schedule(state.interval)
     {:noreply, state}
   end
