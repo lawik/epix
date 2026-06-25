@@ -47,6 +47,34 @@ PY
 
 Label convention: `1` = injection (positive), `0` = legitimate.
 
+## ONNX classifier stage (`bench/onnx_eval.exs`)
+
+Scores the ProtectAI DeBERTa-v3 prompt-injection classifier — run on **CPU via
+Ortex, no Python** — on the same datasets. First download the model + tokenizer
+into `bench/data/protectai/` (also gitignored, ~740MB):
+
+```sh
+base="https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2/resolve/main/onnx"
+mkdir -p bench/data/protectai
+for f in model.onnx tokenizer.json config.json; do
+  curl -sL "$base/$f" -o "bench/data/protectai/$f"
+done
+
+mix run bench/injection_eval.exs   # populate dataset caches first
+mix run bench/onnx_eval.exs        # then score the classifier
+```
+
+Baseline (this model vs `basic_detect/1`):
+
+| stage | deepset recall | safeguard recall | precision | FPR | latency |
+|-------|---------------|------------------|-----------|-----|---------|
+| regex `basic_detect` | 23.6% | 31.8% | 88–100% | 0–1.9% | <1ms |
+| ONNX deberta-v3 | 41.4% | **84.0%** | 96–99.6% | 0.1–1.0% | 30–86ms CPU |
+
+The classifier roughly doubles-to-triples recall at equal-or-better precision.
+deepset stays lower because it is multilingual (German) and this model is
+English-only — the same blind spot as the regex.
+
 ## Caveat: domain mismatch
 
 These datasets classify **user → model prompts**. `Epix.InjectionDetector`

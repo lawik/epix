@@ -85,6 +85,11 @@ defmodule Epix.MixProject do
       {:nstandard, "~> 0.5", runtime: false},
       {:req_llm, "~> 1.0"},
       {:req, "~> 0.6"},
+      # Bench-only for now: ONNX prompt-injection classifier (Ortex) + its
+      # tokenizer, exercised by bench/onnx_eval.exs. Promote to a runtime dep
+      # only if it earns a place as a detector stage.
+      {:ortex, "~> 0.1", only: [:dev, :test]},
+      {:tokenizers, "~> 0.5", only: [:dev, :test]},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

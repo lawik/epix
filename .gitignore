@@ -28,3 +28,6 @@ epix-*.tar
 
 # Downloaded benchmark datasets (resolved by bench/injection_eval.exs).
 /bench/data/
+
+# Local working notes for the injection detector (not shared).
+/INJECTION.md
