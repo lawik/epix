@@ -54,7 +54,8 @@ defmodule Epix.Lua.Sandbox do
 
   @impl true
   def init(opts) do
-    {:ok, %{tools: %{}, store: opts[:store], namespaces: opts[:namespaces] || []}}
+    web = if is_list(opts[:web]), do: opts[:web], else: nil
+    {:ok, %{tools: %{}, store: opts[:store], namespaces: opts[:namespaces] || [], web: web}}
   end
 
   @impl true
@@ -101,12 +102,13 @@ defmodule Epix.Lua.Sandbox do
 
   def handle_call(:namespaces, _from, state), do: {:reply, state.namespaces, state}
 
-  # The `store` API is installed only when a store is configured; the granted
-  # namespaces are snapshotted into each eval.
-  defp lua_ctx(%{store: nil}), do: nil
+  # `kv` is installed only when a store is configured and `web` only when web is
+  # enabled; the granted namespaces are snapshotted into each eval. With neither,
+  # the run gets just `time`.
+  defp lua_ctx(%{store: nil, web: nil}), do: nil
 
-  defp lua_ctx(%{store: store, namespaces: namespaces}),
-    do: %{store: store, namespaces: namespaces}
+  defp lua_ctx(%{store: store, namespaces: namespaces, web: web}),
+    do: %{store: store, namespaces: namespaces, web: web}
 
   defp normalize_params(nil), do: []
   defp normalize_params(params) when is_list(params), do: Enum.map(params, &to_string/1)

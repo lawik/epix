@@ -27,9 +27,17 @@ defmodule Epix.Session do
   @doc """
   Starts a session.
 
+  Configuration is explicit — the session reads no global/application env. Pass
+  `:model` (a `ReqLLM` model; required to talk to a provider) and `:api_key`
+  directly, or splat `Epix.Model.from_env/0` to source them from `EPIX_*` env in
+  a dev tool or test. (Tests inject `:model_fun` instead and need neither.)
+
   Options: `:model`, `:api_key`, `:sandbox` (reuse one), `:store` (an `Epix.Store`
-  to enable the Lua `store` API), `:namespaces` (the storage namespaces this agent
-  may access, default `[]`), `:max_steps`, `:temperature`, `:max_tokens`,
+  to enable the Lua `kv` API), `:namespaces` (the storage namespaces this agent
+  may access, default `[]`), `:web` (enable the Lua `web` API — search and clean
+  page fetch — by passing a keyword list of `Epix.Kagi` options, e.g.
+  `Epix.Kagi.from_env()` or `[api_key: key]`), `:max_steps`, `:temperature`,
+  `:max_tokens`,
   `:receive_timeout` (per-request HTTP timeout, ms, default 60_000), `:verbose`,
   `:system_prompt`, `:name`.
   """
@@ -83,7 +91,10 @@ defmodule Epix.Session do
 
   @impl true
   def init(opts) do
-    system = opts[:system_prompt] || SystemPrompt.build(storage: opts[:store] != nil)
+    system =
+      opts[:system_prompt] ||
+        SystemPrompt.build(storage: opts[:store] != nil, web: is_list(opts[:web]))
+
     context = Context.new([Context.system(system)])
 
     state = %{
@@ -302,7 +313,13 @@ defmodule Epix.Session do
   end
 
   defp start_sandbox!(opts) do
-    {:ok, pid} = Sandbox.start_link(store: opts[:store], namespaces: opts[:namespaces] || [])
+    {:ok, pid} =
+      Sandbox.start_link(
+        store: opts[:store],
+        namespaces: opts[:namespaces] || [],
+        web: opts[:web]
+      )
+
     pid
   end
 end

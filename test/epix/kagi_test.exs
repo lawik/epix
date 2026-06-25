@@ -117,12 +117,19 @@ defmodule Epix.KagiTest do
   end
 
   describe "configuration" do
-    test "raises a clear error when no API key is available" do
-      prev = System.get_env("KAGI_API_KEY")
-      System.delete_env("KAGI_API_KEY")
-      on_exit(fn -> if prev, do: System.put_env("KAGI_API_KEY", prev) end)
+    test "raises a clear error when no :api_key is given" do
+      assert_raise ArgumentError, ~r/api key/i, fn -> Kagi.search("x") end
+    end
 
-      assert_raise ArgumentError, ~r/KAGI_API_KEY/, fn -> Kagi.search("x") end
+    test "from_env/0 sources the key from KAGI_API_KEY" do
+      prev = System.get_env("KAGI_API_KEY")
+      System.put_env("KAGI_API_KEY", "env-key")
+
+      on_exit(fn ->
+        if prev, do: System.put_env("KAGI_API_KEY", prev), else: System.delete_env("KAGI_API_KEY")
+      end)
+
+      assert Kagi.from_env() == [api_key: "env-key"]
     end
   end
 
@@ -146,12 +153,13 @@ defmodule Epix.KagiTest do
     @describetag :kagi_live
 
     test "search returns real results" do
-      assert {:ok, [_ | _] = results} = Kagi.search("elixir programming language", limit: 3)
+      opts = Kagi.from_env() ++ [limit: 3]
+      assert {:ok, [_ | _] = results} = Kagi.search("elixir programming language", opts)
       assert Enum.all?(results, &is_binary(&1.url))
     end
 
     test "fetch returns markdown for a real page" do
-      assert {:ok, markdown} = Kagi.fetch("https://elixir-lang.org")
+      assert {:ok, markdown} = Kagi.fetch("https://elixir-lang.org", Kagi.from_env())
       assert is_binary(markdown) and markdown != ""
     end
   end

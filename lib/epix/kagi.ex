@@ -4,8 +4,10 @@ defmodule Epix.Kagi do
   two capabilities Epix needs: web **search** and **clean page fetching**.
 
   Both go through Kagi's v1 API (`https://kagi.com/api/v1`), authenticated with a
-  bearer key minted at <https://kagi.com/api/keys>. The key is read from the
-  `KAGI_API_KEY` environment variable, or passed per call as `:api_key`.
+  bearer key minted at <https://kagi.com/api/keys>. Configuration is explicit: the
+  key is passed per call as `:api_key`, and this module never reads the
+  environment on its own. `from_env/0` sources the key from `KAGI_API_KEY` for dev
+  tools and tests — e.g. `Epix.start_session(web: Epix.Kagi.from_env())`.
 
       iex> Epix.Kagi.search("elixir lang")
       {:ok, [%{url: "https://elixir-lang.org", title: "Elixir", snippet: "...", published: nil}]}
@@ -42,6 +44,17 @@ defmodule Epix.Kagi do
         }
 
   @type error :: Epix.Kagi.Error.t() | Exception.t()
+
+  @doc """
+  Kagi options sourced from the environment, for dev tools and tests.
+
+  Returns `[api_key: ...]` read from `KAGI_API_KEY`. The library never reads the
+  environment itself; a caller opts in by splatting these (or passing its own
+  `:api_key`) — e.g. `Epix.Kagi.search(query, Epix.Kagi.from_env())` or
+  `Epix.start_session(web: Epix.Kagi.from_env())`.
+  """
+  @spec from_env() :: keyword()
+  def from_env(), do: [api_key: System.get_env("KAGI_API_KEY")]
 
   @doc """
   Runs a web search for `query` and returns up to `:limit` normalized results.
@@ -131,10 +144,9 @@ defmodule Epix.Kagi do
   defp error_details(_body), do: []
 
   defp api_key!(opts) do
-    opts[:api_key] || System.get_env("KAGI_API_KEY") ||
+    opts[:api_key] ||
       raise ArgumentError,
-            "no Kagi API key configured: pass :api_key or set the KAGI_API_KEY " <>
-              "environment variable"
+            "no Kagi API key: pass :api_key (e.g. from Epix.Kagi.from_env/0)"
   end
 
   defp base_url(opts), do: opts[:base_url] || @base_url

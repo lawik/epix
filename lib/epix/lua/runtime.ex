@@ -9,11 +9,14 @@ defmodule Epix.Lua.Runtime do
   Results and errors are returned as strings ready to hand back to the model.
   """
 
-  alias Epix.Lua.{KvApi, TimeApi}
+  alias Epix.Lua.{KvApi, TimeApi, WebApi}
 
   @type result :: {:ok, String.t()} | {:error, String.t()}
-  # nil = no storage; otherwise the store + granted namespaces for the `kv` API.
-  @type ctx :: nil | KvApi.ctx()
+  # nil = nothing beyond `time`; otherwise the optionally-present `kv` (store +
+  # granted namespaces) and `web` (Kagi options) capabilities for this run.
+  @type ctx ::
+          nil
+          | %{store: Epix.Store.t() | nil, namespaces: [String.t()], web: keyword() | nil}
 
   @doc "Evaluates a one-shot Lua snippet. Use `return X` to produce a result."
   @spec eval(String.t(), ctx()) :: result()
@@ -52,7 +55,21 @@ defmodule Epix.Lua.Runtime do
   end
 
   defp build(nil), do: TimeApi.install(Lua.new())
-  defp build(ctx), do: TimeApi.install(Lua.new()) |> KvApi.install(ctx)
+
+  defp build(ctx) when is_map(ctx) do
+    Lua.new()
+    |> TimeApi.install()
+    |> maybe_install_kv(ctx)
+    |> maybe_install_web(ctx)
+  end
+
+  defp maybe_install_kv(lua, %{store: store, namespaces: namespaces}) when not is_nil(store),
+    do: KvApi.install(lua, %{store: store, namespaces: namespaces})
+
+  defp maybe_install_kv(lua, _ctx), do: lua
+
+  defp maybe_install_web(lua, %{web: opts}) when is_list(opts), do: WebApi.install(lua, opts)
+  defp maybe_install_web(lua, _ctx), do: lua
 
   defp wrap(params, code) do
     "local function __tool(#{Enum.join(params, ", ")})\n#{code}\nend\n"

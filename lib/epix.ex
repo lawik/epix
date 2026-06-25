@@ -7,11 +7,13 @@ defmodule Epix do
     * `Epix.Loop` - the pure agent loop (struct + transitions), faithful to Pi
     * `Epix.Runner` - drives the loop, performing injected effects
     * `Epix.Session` - GenServer shell owning the sandbox and conversation
-    * `Epix.Lua.Sandbox` / `Epix.Lua.Runtime` / `Epix.Lua.HostApi` - the Lua layer
+    * `Epix.Lua.Sandbox` / `Epix.Lua.Runtime` and the API tables
+      (`Epix.Lua.TimeApi` / `Epix.Lua.KvApi` / `Epix.Lua.WebApi`) - the Lua layer
     * `Epix.Tools` - the model-facing tools (eval/define/run/list)
     * `Epix.SystemPrompt` - the base context
 
-      {:ok, session} = Epix.start_session()
+      # Pass the model/key explicitly; `from_env/0` sources them from EPIX_* env.
+      {:ok, session} = Epix.start_session(Epix.Model.from_env())
       Epix.Session.run(session, "Use Lua to compute 19 + 23.")
   """
 

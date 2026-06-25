@@ -4,14 +4,15 @@ defmodule Epix.SystemPrompt do
 
   It documents two distinct surfaces:
 
-    * the Lua sandbox API (`time`, and `kv` when storage is enabled), callable
-      *inside* your Lua, and
+    * the Lua sandbox API (`time`, `kv` when storage is enabled, and `web` when
+      search is enabled), callable *inside* your Lua, and
     * the function-calling tools you invoke to eval, define, and run Lua.
 
-  The `kv` section is included only when storage is enabled for the session.
+  The `kv` and `web` sections are included only when those capabilities are
+  enabled for the session.
   """
 
-  alias Epix.Lua.{KvApi, TimeApi}
+  alias Epix.Lua.{KvApi, TimeApi, WebApi}
 
   @spec build(keyword()) :: String.t()
   def build(opts \\ []) do
@@ -29,6 +30,7 @@ defmodule Epix.SystemPrompt do
 
     #{TimeApi.docs()}
     #{storage_section(opts[:storage])}
+    #{web_section(opts[:web])}
     ## Your tools
 
     - `lua_eval(code)` — run a one-shot Lua snippet. Use `return X` to get a value
@@ -63,4 +65,17 @@ defmodule Epix.SystemPrompt do
   end
 
   defp storage_section(_disabled), do: ""
+
+  defp web_section(true) do
+    """
+
+    You can also reach the live web through a `web` table. Searching and fetching
+    cost a network round-trip, so reach for them when the task needs current or
+    external information, not for things you already know.
+
+    #{WebApi.docs()}
+    """
+  end
+
+  defp web_section(_disabled), do: ""
 end

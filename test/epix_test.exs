@@ -12,6 +12,11 @@ defmodule EpixTest do
     assert Epix.SystemPrompt.build(storage: true) =~ "kv.put"
   end
 
+  test "the system prompt documents the web API only when search is enabled" do
+    refute Epix.SystemPrompt.build(web: false) =~ "web.search"
+    assert Epix.SystemPrompt.build(web: true) =~ "web.search"
+  end
+
   test "tool specs expose the meta-tools, including list_namespaces" do
     names = Epix.Tools.specs() |> Enum.map(& &1.name) |> Enum.sort()
 
