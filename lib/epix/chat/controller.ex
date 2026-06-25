@@ -2,9 +2,9 @@ defmodule Epix.Chat.Controller do
   @moduledoc """
   Solve controller owning chat state and the loop run.
 
-  This is the frontend-agnostic source of truth: it exposes `%{messages, status}`
-  to any subscriber (a term_ui adapter, an API, an MCP server). On `:submit` it
-  runs the loop in a Task so the controller stays responsive, and folds the loop's
+  This is the frontend-agnostic source of truth: it exposes `%{messages, status,
+  log}` to any subscriber (an API, an MCP server, or a TUI). On `:submit` it runs
+  the loop in a Task so the controller stays responsive, and folds the loop's
   emitted events into exposed state via the pure `Epix.Chat.Projection`.
   """
 

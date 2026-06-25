@@ -4,15 +4,13 @@ defmodule Epix.Chat.Projection do
 
   Keeping this a pure function (state + event -> state) means the interesting
   logic, how a run turns into a transcript and a stage log, is testable without
-  Solve, term_ui, or a model. The Solve controller just calls these in its
-  `handle_info`.
+  Solve or a model. The Solve controller just calls these in its `handle_info`.
 
   View state is `%{messages: [message], status: status, log: [String.t()]}`:
 
-    * `messages` - the conversational transcript shown in the main pane
+    * `messages` - the conversational transcript
     * `log` - every internal stage (request, response timing, tool start/finish),
-      shown in the side panel so a slow model call is visible rather than a frozen
-      `[thinking]`
+      so a slow model call is visible rather than a frozen `[thinking]`
   """
 
   @type role :: :user | :assistant | :activity | :error
