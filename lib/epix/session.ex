@@ -87,6 +87,22 @@ defmodule Epix.Session do
   @spec namespaces(t()) :: [String.t()]
   def namespaces(session), do: GenServer.call(session, :namespaces)
 
+  @doc """
+  Clears the conversation back to a fresh start (keeping the system prompt, the
+  sandbox, and storage). Refused while a run is in progress.
+  """
+  @spec reset(t()) :: :ok | {:error, :busy}
+  def reset(session), do: GenServer.call(session, :reset)
+
+  @doc "Reports session state: `running?`, the model id, accessible namespaces, and message count."
+  @spec status(t()) :: %{
+          running: boolean(),
+          model: term(),
+          namespaces: [String.t()],
+          messages: non_neg_integer()
+        }
+  def status(session), do: GenServer.call(session, :status)
+
   # --- server ---
 
   @impl true
@@ -125,6 +141,9 @@ defmodule Epix.Session do
     |> Keyword.put_new(:tool_execution, :sequential)
     |> then(&struct(Config, &1))
   end
+
+  defp model_id(model) when is_struct(model), do: Map.get(model, :id)
+  defp model_id(_model), do: nil
 
   @impl true
   def handle_call({:run, _prompt, _opts}, _from, %{run: run} = state) when run != nil do
@@ -175,6 +194,26 @@ defmodule Epix.Session do
 
   def handle_call(:namespaces, _from, state) do
     {:reply, Sandbox.namespaces(state.sandbox), state}
+  end
+
+  def handle_call(:reset, _from, %{run: run} = state) when run != nil do
+    {:reply, {:error, :busy}, state}
+  end
+
+  def handle_call(:reset, _from, state) do
+    [system | _rest] = state.context.messages
+    {:reply, :ok, %{state | context: Context.new([system])}}
+  end
+
+  def handle_call(:status, _from, state) do
+    status = %{
+      running: state.run != nil,
+      model: model_id(state.config.model),
+      namespaces: Sandbox.namespaces(state.sandbox),
+      messages: length(state.context.messages)
+    }
+
+    {:reply, status, state}
   end
 
   @impl true
