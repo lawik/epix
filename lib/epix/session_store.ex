@@ -1,59 +1,55 @@
 defmodule Epix.SessionStore do
   @moduledoc """
-  Durable storage for whole agent sessions, on top of `Epix.Store` (CubDB).
+  Per-session durable storage — deliberately separate from `Epix.Store` (the
+  namespaced KV) so the two can never be confused.
 
-  A session record is its conversation plus the namespaces it was granted, keyed
-  by session id. Restoring a session by id resumes the conversation; the agent's
-  kv namespaces persist independently (one CubDB each), so the data it stored
-  comes back with it. Records live in one reserved namespace, separate from any
-  agent namespace.
+  A session is the history of one exchange with an agent (its conversation and the
+  capabilities it was granted, like namespaces). It is persisted to **its own
+  CubDB**, in a directory named by the session id under a base directory:
+
+      <base_dir>/<session_id>/
+
+  So each session is one storage backend, a KV namespace is a different one, and
+  the set of sessions is just the set of id-named directories under `base_dir` —
+  no separate index needed.
+
+  A KV (`Epix.Store`) is namespaced and a session may be granted many namespaces;
+  those are independent backends. This module never touches them.
   """
 
-  alias Epix.Store
-
-  @namespace "_epix_sessions"
+  @record_key :record
 
   @type record :: %{
-          id: String.t(),
           messages: [ReqLLM.Message.t()],
           namespaces: [String.t()],
           updated_at: integer()
         }
 
-  @doc "Persists a session's conversation and granted namespaces under `id`."
-  @spec save(Store.t(), String.t(), %{messages: list(), namespaces: [String.t()]}) :: :ok
-  def save(store, id, %{messages: messages, namespaces: namespaces}) do
-    record = %{
-      id: id,
-      messages: messages,
-      namespaces: namespaces,
-      updated_at: System.os_time(:second)
-    }
+  @doc "Opens (creating if absent) the CubDB for session `id`, linked to the caller."
+  @spec open(Path.t(), String.t()) :: {:ok, pid()} | {:error, term()}
+  def open(base_dir, id), do: CubDB.start_link(data_dir: Path.join(base_dir, id))
 
-    Store.put(store, @namespace, id, record)
+  @doc "Loads the session record from an open session db, or `nil` if none yet."
+  @spec load(pid()) :: record() | nil
+  def load(db), do: CubDB.get(db, @record_key)
+
+  @doc "Writes the session record to an open session db."
+  @spec save(pid(), record()) :: :ok
+  def save(db, record), do: CubDB.put(db, @record_key, record)
+
+  @doc "Lists the session ids that have storage under `base_dir` (the index)."
+  @spec list(Path.t()) :: [String.t()]
+  def list(base_dir) do
+    case File.ls(base_dir) do
+      {:ok, entries} -> Enum.filter(entries, &File.dir?(Path.join(base_dir, &1)))
+      {:error, _reason} -> []
+    end
   end
 
-  @doc "Loads a session record by id, or `nil` if there is none."
-  @spec load(Store.t(), String.t()) :: record() | nil
-  def load(store, id), do: Store.get(store, @namespace, id)
-
-  @doc "Lists saved sessions (id + summary), most recently updated first."
-  @spec list(Store.t()) :: [%{id: String.t(), updated_at: integer(), messages: non_neg_integer()}]
-  def list(store) do
-    store
-    |> Store.keys(@namespace)
-    |> Enum.map(&summarize(Store.get(store, @namespace, &1)))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.sort_by(& &1.updated_at, :desc)
-  end
-
-  @doc "Deletes a saved session (the conversation record only; its kv data persists)."
-  @spec delete(Store.t(), String.t()) :: :ok
-  def delete(store, id), do: Store.delete(store, @namespace, id)
-
-  defp summarize(nil), do: nil
-
-  defp summarize(record) do
-    %{id: record.id, updated_at: record.updated_at, messages: length(record.messages)}
+  @doc "Deletes a session's storage directory (the db must be closed first)."
+  @spec delete(Path.t(), String.t()) :: :ok
+  def delete(base_dir, id) do
+    File.rm_rf!(Path.join(base_dir, id))
+    :ok
   end
 end

@@ -1,48 +1,55 @@
 defmodule Epix.SessionStoreTest do
   use ExUnit.Case, async: true
 
-  alias Epix.{SessionStore, Store}
+  alias Epix.SessionStore
   alias ReqLLM.Message
 
   @moduletag :tmp_dir
 
-  setup context do
-    name = Module.concat(__MODULE__, "S#{System.unique_integer([:positive])}")
-    {:ok, _sup} = Store.start_link(name: name, dir: context.tmp_dir)
-    %{store: name}
-  end
-
   defp msg(role, text), do: %Message{role: role, content: [%{type: :text, text: text}]}
 
-  test "save/load round-trips a record", %{store: store} do
-    assert SessionStore.load(store, "x") == nil
+  defp record(messages, namespaces \\ []),
+    do: %{messages: messages, namespaces: namespaces, updated_at: 1}
 
-    messages = [msg(:system, "sys"), msg(:user, "hi")]
-    :ok = SessionStore.save(store, "x", %{messages: messages, namespaces: ["agent:x"]})
+  test "each session is its own db under an id-named directory", %{tmp_dir: dir} do
+    {:ok, db} = SessionStore.open(dir, "sess-1")
+    assert SessionStore.load(db) == nil
 
-    record = SessionStore.load(store, "x")
-    assert record.id == "x"
-    assert record.messages == messages
-    assert record.namespaces == ["agent:x"]
-    assert is_integer(record.updated_at)
+    rec = record([msg(:user, "hi")], ["agent:sess-1"])
+    :ok = SessionStore.save(db, rec)
+    assert SessionStore.load(db) == rec
+    assert File.dir?(Path.join(dir, "sess-1"))
+    CubDB.stop(db)
   end
 
-  test "list summarizes saved sessions", %{store: store} do
-    SessionStore.save(store, "a", %{messages: [msg(:user, "1")], namespaces: []})
+  test "data survives reopening the same session db", %{tmp_dir: dir} do
+    {:ok, db} = SessionStore.open(dir, "x")
+    SessionStore.save(db, record([msg(:user, "remember")]))
+    CubDB.stop(db)
 
-    SessionStore.save(store, "b", %{
-      messages: [msg(:user, "1"), msg(:assistant, "2")],
-      namespaces: []
-    })
-
-    list = SessionStore.list(store)
-    assert Enum.map(list, & &1.id) |> Enum.sort() == ["a", "b"]
-    assert Enum.find(list, &(&1.id == "b")).messages == 2
+    {:ok, reopened} = SessionStore.open(dir, "x")
+    assert SessionStore.load(reopened).messages == [msg(:user, "remember")]
+    CubDB.stop(reopened)
   end
 
-  test "delete removes a record", %{store: store} do
-    SessionStore.save(store, "x", %{messages: [], namespaces: []})
-    assert :ok = SessionStore.delete(store, "x")
-    assert SessionStore.load(store, "x") == nil
+  test "list returns the id-named directories (the session index)", %{tmp_dir: dir} do
+    for id <- ["a", "b"] do
+      {:ok, db} = SessionStore.open(dir, id)
+      SessionStore.save(db, record([]))
+      CubDB.stop(db)
+    end
+
+    assert Enum.sort(SessionStore.list(dir)) == ["a", "b"]
+    assert SessionStore.list(Path.join(dir, "nope")) == []
+  end
+
+  test "delete removes a session's directory", %{tmp_dir: dir} do
+    {:ok, db} = SessionStore.open(dir, "x")
+    SessionStore.save(db, record([]))
+    CubDB.stop(db)
+
+    assert :ok = SessionStore.delete(dir, "x")
+    refute File.dir?(Path.join(dir, "x"))
+    assert SessionStore.list(dir) == []
   end
 end

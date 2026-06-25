@@ -37,9 +37,10 @@ defmodule Epix.Session do
   may access, default `[]`), `:web` (enable the Lua `web` API — search and clean
   page fetch — by passing a keyword list of `Epix.Kagi` options, e.g.
   `Epix.Kagi.from_env()` or `[api_key: key]`), `:id` (the session id, default a
-  fresh UUID), `:persist` (an `Epix.Store` to save the session to after each run;
-  if a record already exists under `:id`, the conversation and its namespaces are
-  resumed on start), `:max_steps`, `:temperature`, `:max_tokens`,
+  fresh UUID), `:persist` (a base directory; the session is saved to its **own**
+  CubDB at `<dir>/<id>` — a separate backend from any kv `:store` — after each run
+  and capability change, and is resumed from there if it already exists),
+  `:max_steps`, `:temperature`, `:max_tokens`,
   `:receive_timeout` (per-request HTTP timeout, ms, default 60_000), `:verbose`,
   `:system_prompt`, `:name`.
   """
@@ -118,18 +119,20 @@ defmodule Epix.Session do
   @impl true
   def init(opts) do
     id = opts[:id] || generate_id()
-    persist = opts[:persist]
     sandbox = opts[:sandbox] || start_sandbox!(opts)
 
     system =
       opts[:system_prompt] ||
         SystemPrompt.build(storage: opts[:store] != nil, web: is_list(opts[:web]))
 
+    # The session's own storage backend (its own CubDB), separate from any kv.
+    session_db = open_session_db(opts[:persist], id)
+
     state = %{
       id: id,
-      persist: persist,
+      session_db: session_db,
       sandbox: sandbox,
-      context: restore_or_new(persist, id, sandbox, system),
+      context: restore_or_new(session_db, sandbox, system),
       config: build_config(opts),
       verbose: opts[:verbose] || false,
       # Effect overrides (advanced/testing): a custom model_fun/tool_fun replaces
@@ -142,13 +145,24 @@ defmodule Epix.Session do
     {:ok, state}
   end
 
-  # A new session starts with just the system prompt. A persisted one is resumed:
-  # its saved conversation is restored and its granted namespaces re-applied (the
-  # kv data those namespaces hold persisted on their own).
-  defp restore_or_new(nil, _id, _sandbox, system), do: Context.new([Context.system(system)])
+  @impl true
+  def terminate(_reason, %{session_db: db}) when is_pid(db), do: CubDB.stop(db)
+  def terminate(_reason, _state), do: :ok
 
-  defp restore_or_new(persist, id, sandbox, system) do
-    case SessionStore.load(persist, id) do
+  defp open_session_db(nil, _id), do: nil
+
+  defp open_session_db(base_dir, id) do
+    {:ok, db} = SessionStore.open(base_dir, id)
+    db
+  end
+
+  # A new session starts with just the system prompt. A persisted one is resumed
+  # from its own backend: its saved conversation is restored and its granted
+  # namespaces re-applied (the kv data those namespaces hold persists separately).
+  defp restore_or_new(nil, _sandbox, system), do: Context.new([Context.system(system)])
+
+  defp restore_or_new(db, sandbox, system) do
+    case SessionStore.load(db) do
       nil ->
         Context.new([Context.system(system)])
 
@@ -186,12 +200,13 @@ defmodule Epix.Session do
     |> IO.iodata_to_binary()
   end
 
-  defp persist(%{persist: nil}), do: :ok
+  defp persist(%{session_db: nil}), do: :ok
 
-  defp persist(%{persist: store, id: id, context: context, sandbox: sandbox}) do
-    SessionStore.save(store, id, %{
+  defp persist(%{session_db: db, context: context, sandbox: sandbox}) do
+    SessionStore.save(db, %{
       messages: context.messages,
-      namespaces: Sandbox.namespaces(sandbox)
+      namespaces: Sandbox.namespaces(sandbox),
+      updated_at: System.os_time(:second)
     })
   end
 
@@ -239,7 +254,9 @@ defmodule Epix.Session do
   def handle_call(:sandbox, _from, state), do: {:reply, state.sandbox, state}
 
   def handle_call({:set_namespaces, namespaces}, _from, state) do
-    {:reply, Sandbox.set_namespaces(state.sandbox, namespaces), state}
+    reply = Sandbox.set_namespaces(state.sandbox, namespaces)
+    persist(state)
+    {:reply, reply, state}
   end
 
   def handle_call(:namespaces, _from, state) do

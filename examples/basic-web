@@ -74,19 +74,24 @@ defmodule BasicWeb.Live do
 
   def handle_info(_other, socket), do: {:noreply, socket}
 
-  # The session is keyed by `id`: it persists to the store (so it can resume), its
-  # private kv namespace is `agent:<id>`, and it gets web search/fetch (Kagi). The
-  # agent discovers its namespace via `list_namespaces`.
+  # The session is keyed by `id`: it persists to its own backend under the
+  # sessions dir (so it can resume), its private kv namespace is `agent:<id>` in
+  # the *separate* kv store, and it gets web search/fetch (Kagi). The agent
+  # discovers its namespace via `list_namespaces`.
   defp session_opts(id) do
     model_opts() ++
       [
         id: id,
         store: BasicWeb.Store,
-        persist: BasicWeb.Store,
+        persist: sessions_dir(),
         namespaces: ["agent:" <> id],
         web: Epix.Kagi.from_env()
       ]
   end
+
+  # Two separate storage backends, in two separate directories.
+  def kv_dir, do: Path.join(System.tmp_dir!(), "epix-basic-web/kv")
+  def sessions_dir, do: Path.join(System.tmp_dir!(), "epix-basic-web/sessions")
 
   defp model_opts do
     Epix.Model.from_env()
@@ -215,9 +220,9 @@ defmodule BasicWeb.Live do
   defp role_label(_other), do: ""
 end
 
-# Shared CubDB-backed store for every agent's kv namespaces (persists in /tmp).
-{:ok, _store} =
-  Epix.Store.start_link(name: BasicWeb.Store, dir: Path.join(System.tmp_dir!(), "epix-basic-web-store"))
+# The namespaced kv store (one CubDB per namespace). Sessions persist separately,
+# each its own CubDB under sessions_dir/<id> — the two never share a backend.
+{:ok, _store} = Epix.Store.start_link(name: BasicWeb.Store, dir: BasicWeb.Live.kv_dir())
 
 # live_reload re-evaluates this whole script on changes, which would re-run
 # Mix.install and re-`defmodule` — so it is off here; edit and restart instead.
