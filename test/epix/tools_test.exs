@@ -21,7 +21,7 @@ defmodule Epix.ToolsTest do
                  "name" => "dbl",
                  "description" => "d",
                  "params" => ["x"],
-                 "code" => "return host.add(x, x)"
+                 "code" => "return x + x"
                },
                s
              )

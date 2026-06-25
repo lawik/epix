@@ -1,6 +1,7 @@
-defmodule Epix.Lua.StoreApi do
+defmodule Epix.Lua.KvApi do
   @moduledoc """
-  Installs the `store` table into a Lua state: the agent's storage interop.
+  Installs the `kv` table into a Lua state: the agent's key-value storage interop,
+  backed by `Epix.Store` (CubDB).
 
   Every call takes an explicit `namespace` (an arbitrary host-defined string). The
   functions close over the granted namespace set, so a call to a namespace the
@@ -13,29 +14,29 @@ defmodule Epix.Lua.StoreApi do
 
   @type ctx :: %{store: Store.t(), namespaces: [String.t()]}
 
-  @doc "Installs `store.*` into the Lua state, bound to the store and granted namespaces."
+  @doc "Installs `kv.*` into the Lua state, bound to the store and granted namespaces."
   @spec install(Lua.t(), ctx()) :: Lua.t()
   def install(%Lua{} = lua, %{store: store, namespaces: namespaces}) do
     lua
-    |> Lua.set!(["store", "get"], get_fun(store, namespaces))
-    |> Lua.set!(["store", "put"], put_fun(store, namespaces))
-    |> Lua.set!(["store", "delete"], delete_fun(store, namespaces))
-    |> Lua.set!(["store", "keys"], keys_fun(store, namespaces))
-    |> Lua.set!(["store", "namespaces"], namespaces_fun(namespaces))
+    |> Lua.set!(["kv", "get"], get_fun(store, namespaces))
+    |> Lua.set!(["kv", "put"], put_fun(store, namespaces))
+    |> Lua.set!(["kv", "delete"], delete_fun(store, namespaces))
+    |> Lua.set!(["kv", "keys"], keys_fun(store, namespaces))
+    |> Lua.set!(["kv", "namespaces"], namespaces_fun(namespaces))
   end
 
-  @doc "Renders the store API as a markdown list for the system prompt."
+  @doc "Renders the kv API as a markdown list for the system prompt."
   @spec docs() :: String.t()
   def docs() do
     """
-    - `store.get(namespace, key)` — read a value, or nil if absent.
-    - `store.put(namespace, key, value)` — store a value (string/number/boolean/table). Returns true.
-    - `store.delete(namespace, key)` — remove a key. Returns true.
-    - `store.keys(namespace)` — list the keys in a namespace.
-    - `store.namespaces()` — list the namespaces you can currently access.
+    - `kv.get(namespace, key)` — read a value, or nil if absent.
+    - `kv.put(namespace, key, value)` — store a value (string/number/boolean/table). Returns true.
+    - `kv.delete(namespace, key)` — remove a key. Returns true.
+    - `kv.keys(namespace)` — list the keys in a namespace.
+    - `kv.namespaces()` — list the namespaces you can currently access.
 
     Every call requires a `namespace`; accessing a namespace you do not have
-    returns an error. Use `list_namespaces` (or `store.namespaces()`) to discover them.
+    raises an error. Use `list_namespaces` (or `kv.namespaces()`) to discover them.
     """
   end
 
@@ -46,7 +47,7 @@ defmodule Epix.Lua.StoreApi do
         encoded_value(lua, Store.get(store, namespace, to_key(key)))
 
       _args, _lua ->
-        raise Lua.RuntimeException, "store.get expects (namespace, key)"
+        raise Lua.RuntimeException, "kv.get expects (namespace, key)"
     end
   end
 
@@ -61,12 +62,11 @@ defmodule Epix.Lua.StoreApi do
             {[true], lua}
 
           :error ->
-            raise Lua.RuntimeException,
-                  "store.put value must be a string, number, boolean, or table"
+            raise Lua.RuntimeException, "kv.put value must be a string, number, boolean, or table"
         end
 
       _args, _lua ->
-        raise Lua.RuntimeException, "store.put expects (namespace, key, value)"
+        raise Lua.RuntimeException, "kv.put expects (namespace, key, value)"
     end
   end
 
@@ -78,7 +78,7 @@ defmodule Epix.Lua.StoreApi do
         {[true], lua}
 
       _args, _lua ->
-        raise Lua.RuntimeException, "store.delete expects (namespace, key)"
+        raise Lua.RuntimeException, "kv.delete expects (namespace, key)"
     end
   end
 
@@ -90,7 +90,7 @@ defmodule Epix.Lua.StoreApi do
         {[encoded], lua}
 
       _args, _lua ->
-        raise Lua.RuntimeException, "store.keys expects (namespace)"
+        raise Lua.RuntimeException, "kv.keys expects (namespace)"
     end
   end
 

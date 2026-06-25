@@ -9,11 +9,11 @@ defmodule Epix.Lua.Runtime do
   Results and errors are returned as strings ready to hand back to the model.
   """
 
-  alias Epix.Lua.{HostApi, StoreApi}
+  alias Epix.Lua.{KvApi, TimeApi}
 
   @type result :: {:ok, String.t()} | {:error, String.t()}
-  # nil = no storage; otherwise the store + granted namespaces for the `store` API.
-  @type ctx :: nil | StoreApi.ctx()
+  # nil = no storage; otherwise the store + granted namespaces for the `kv` API.
+  @type ctx :: nil | KvApi.ctx()
 
   @doc "Evaluates a one-shot Lua snippet. Use `return X` to produce a result."
   @spec eval(String.t(), ctx()) :: result()
@@ -51,8 +51,8 @@ defmodule Epix.Lua.Runtime do
     run(fn -> Lua.eval!(lua, script) end)
   end
 
-  defp build(nil), do: HostApi.install(Lua.new())
-  defp build(ctx), do: HostApi.install(Lua.new()) |> StoreApi.install(ctx)
+  defp build(nil), do: TimeApi.install(Lua.new())
+  defp build(ctx), do: TimeApi.install(Lua.new()) |> KvApi.install(ctx)
 
   defp wrap(params, code) do
     "local function __tool(#{Enum.join(params, ", ")})\n#{code}\nend\n"

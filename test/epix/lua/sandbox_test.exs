@@ -13,9 +13,9 @@ defmodule Epix.Lua.SandboxTest do
       assert {:ok, "4"} = Sandbox.eval(s, "return 2 + 2")
     end
 
-    test "exposes the host API", %{sandbox: s} do
-      assert {:ok, ~s("HI")} = Sandbox.eval(s, "return host.upper('hi')")
-      assert {:ok, "42"} = Sandbox.eval(s, "return host.add(40, 2)")
+    test "exposes the time API", %{sandbox: s} do
+      assert {:ok, ~s("number")} = Sandbox.eval(s, "return type(time.now())")
+      assert {:ok, "true"} = Sandbox.eval(s, "return time.now() > 0")
     end
 
     test "keeps standard string/table/math libs", %{sandbox: s} do
@@ -38,30 +38,22 @@ defmodule Epix.Lua.SandboxTest do
       assert message =~ ~r/compile/i
     end
 
-    test "returns runtime errors", %{sandbox: s} do
-      assert {:error, message} = Sandbox.eval(s, "return host.nope()")
+    test "returns runtime errors without leaking host internals", %{sandbox: s} do
+      assert {:error, message} = Sandbox.eval(s, "return missing_fn()")
       assert is_binary(message) and message != ""
-    end
-
-    test "host functions raise a clean error on bad arguments (no module leak)", %{sandbox: s} do
-      assert {:error, message} = Sandbox.eval(s, "return host.add(1)")
-      assert message =~ "host.add expects"
-      refute message =~ "Epix.Lua.HostApi"
-
-      assert {:error, message} = Sandbox.eval(s, "return host.upper(123)")
-      assert message =~ "host.upper expects"
+      refute message =~ "Epix.Lua"
     end
 
     test "unencodable values are not leaked via inspect", %{sandbox: s} do
-      # echo of a function ref cannot be JSON-encoded; must not leak Erlang internals.
-      assert {:ok, "<unencodable lua value>"} = Sandbox.eval(s, "return host.echo(print)")
+      # A function ref cannot be JSON-encoded; must not leak Erlang internals.
+      assert {:ok, "<unencodable lua value>"} = Sandbox.eval(s, "return print")
     end
   end
 
   describe "define_tool/5 and run_tool/3" do
     test "defines, lists, and runs a tool", %{sandbox: s} do
       assert :ok =
-               Sandbox.define_tool(s, "double", "doubles x", ["x"], "return host.add(x, x)")
+               Sandbox.define_tool(s, "double", "doubles x", ["x"], "return x + x")
 
       assert [%{name: "double", params: ["x"]}] = Sandbox.list_tools(s)
       assert {:ok, "42"} = Sandbox.run_tool(s, "double", %{"x" => 21})

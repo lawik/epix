@@ -4,13 +4,14 @@ defmodule Epix.SystemPrompt do
 
   It documents two distinct surfaces:
 
-    * the Lua sandbox `host`/`store` API (functions callable *inside* your Lua), and
+    * the Lua sandbox API (`time`, and `kv` when storage is enabled), callable
+      *inside* your Lua, and
     * the function-calling tools you invoke to eval, define, and run Lua.
 
-  The `store` section is included only when storage is enabled for the session.
+  The `kv` section is included only when storage is enabled for the session.
   """
 
-  alias Epix.Lua.{HostApi, StoreApi}
+  alias Epix.Lua.{KvApi, TimeApi}
 
   @spec build(keyword()) :: String.t()
   def build(opts \\ []) do
@@ -24,9 +25,9 @@ defmodule Epix.SystemPrompt do
 
     Inside any Lua you run, the standard `string`, `table`, and `math` libraries
     are available (the dangerous ones like `os`, `io`, and `package` are removed).
-    In addition, the host exposes a `host` table:
+    The host also exposes:
 
-    #{HostApi.docs()}
+    #{TimeApi.docs()}
     #{storage_section(opts[:storage])}
     ## Your tools
 
@@ -53,11 +54,11 @@ defmodule Epix.SystemPrompt do
   defp storage_section(true) do
     """
 
-    You also have a `store` table for persistent key-value storage, organized into
+    You also have a `kv` table for persistent key-value storage, organized into
     named namespaces (e.g. "user:5", "project:x"). Every call takes a `namespace`;
-    call `list_namespaces()` or `store.namespaces()` to see which you can access.
+    call `list_namespaces()` or `kv.namespaces()` to see which you can access.
 
-    #{StoreApi.docs()}
+    #{KvApi.docs()}
     """
   end
 
