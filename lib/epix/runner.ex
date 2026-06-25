@@ -6,15 +6,16 @@ defmodule Epix.Runner do
   effects the loop needs, supplied as functions so the driver has no hard
   dependency on a provider or a process:
 
-    * `model_fun` - `(context, config, run_ctx) -> {:ok, Turn} | {:error, reason}`
-    * `tool_fun` - `(ReqLLM.ToolCall, run_ctx) -> body_text`
+    * `model_fun` - `(context, config, Epix.Runner.Ctx.t()) -> {:ok, Turn} | {:error, reason}`
+    * `tool_fun` - `(ReqLLM.ToolCall, Epix.Runner.Ctx.t()) -> body_text`
 
-  `run_ctx` carries the observability sink (`emit`, an `Epix.Event` callback), the
-  cancellation token (`abort`), and the driver's injected hooks (steering,
-  follow-up, compaction, and the per-turn hooks). `model_fun`/`tool_fun` use only
-  `emit` and `abort`; the hooks are consumed by the driver itself. Injecting the
-  effects is what makes the whole loop testable offline: pass a fake `model_fun`
-  that returns scripted turns (Pi's faux-provider trick) and a fake `tool_fun`.
+  The effects receive an `Epix.Runner.Ctx` (just the event sink `emit` and the
+  cancellation token `abort`) — a deliberately small contract. The driver's
+  extension points live in `Epix.Runner.Hooks` (steering, follow-up, compaction,
+  per-turn hooks) and are consumed by the driver itself, never passed to the
+  effects. Injecting the effects is what makes the whole loop testable offline:
+  pass a fake `model_fun` that returns scripted turns (Pi's faux-provider trick)
+  and a fake `tool_fun`.
 
   Tool calls run in parallel by default (see `Config.tool_execution`), preserving
   assistant source order; the Session opts into sequential because its Lua tools
@@ -22,23 +23,13 @@ defmodule Epix.Runner do
   """
 
   alias Epix.{Abort, Event, Loop}
+  alias Epix.Runner.{Ctx, Hooks, Run}
 
   require Logger
 
-  @type run_ctx :: %{
-          emit: Event.emit(),
-          abort: Abort.t(),
-          steering: (-> [String.t() | list()]),
-          follow_up: (-> [String.t() | list()]),
-          compaction: ([ReqLLM.Message.t()] -> {:ok, [ReqLLM.Message.t()]} | {:error, term()}),
-          transform_context: ([ReqLLM.Message.t()] -> [ReqLLM.Message.t()]),
-          before_tool_call: (ReqLLM.ToolCall.t() -> :ok | {:block, String.t()}),
-          after_tool_call: (ReqLLM.ToolCall.t(), String.t() -> String.t()),
-          prepare_next_turn: (Loop.State.t() -> Loop.State.t())
-        }
-  @type model_fun :: (ReqLLM.Context.t(), Loop.Config.t(), run_ctx() ->
+  @type model_fun :: (ReqLLM.Context.t(), Loop.Config.t(), Ctx.t() ->
                         {:ok, Loop.Turn.t()} | {:error, term()})
-  @type tool_fun :: (ReqLLM.ToolCall.t(), run_ctx() -> String.t())
+  @type tool_fun :: (ReqLLM.ToolCall.t(), Ctx.t() -> String.t())
 
   # Compact-and-retry attempts when a model call reports a context overflow.
   @overflow_retries 1
@@ -47,103 +38,97 @@ defmodule Epix.Runner do
   Runs the loop to termination. Returns `{result, final_state}`.
 
   Options: `:emit` (`Epix.Event.emit`, default no-op), `:abort` (`Epix.Abort.t`,
-  default a fresh token), `:steering` / `:follow_up` (0-arity functions returning
-  a list of user-message contents — pulled before each model call and when the
-  run would otherwise halt, respectively), `:verbose` (log, default false).
+  default a fresh token), `:verbose` (log, default false), and any
+  `Epix.Runner.Hooks` field (`:steering`, `:follow_up`, `:compaction`,
+  `:transform_context`, `:before_tool_call`, `:after_tool_call`,
+  `:prepare_next_turn`).
   """
   @spec run(Loop.State.t(), model_fun(), tool_fun(), keyword()) ::
           {Loop.result(), Loop.State.t()}
   def run(%Loop.State{} = state, model_fun, tool_fun, opts \\ []) do
-    rctx = %{
-      emit: Keyword.get(opts, :emit, Event.noop()),
-      abort: Keyword.get(opts, :abort) || Abort.new(),
-      steering: Keyword.get(opts, :steering, &no_messages/0),
-      follow_up: Keyword.get(opts, :follow_up, &no_messages/0),
-      compaction: Keyword.get(opts, :compaction, &default_compaction/1),
-      transform_context: Keyword.get(opts, :transform_context, &Function.identity/1),
-      before_tool_call: Keyword.get(opts, :before_tool_call, &default_before_tool/1),
-      after_tool_call: Keyword.get(opts, :after_tool_call, &default_after_tool/2),
-      prepare_next_turn: Keyword.get(opts, :prepare_next_turn, &Function.identity/1)
+    run = %Run{
+      model_fun: model_fun,
+      tool_fun: tool_fun,
+      ctx: %Ctx{
+        emit: Keyword.get(opts, :emit, Event.noop()),
+        abort: Keyword.get(opts, :abort) || Abort.new()
+      },
+      hooks: Hooks.from_opts(opts),
+      verbose: Keyword.get(opts, :verbose, false)
     }
 
-    drive(state, model_fun, tool_fun, rctx, Keyword.get(opts, :verbose, false))
+    drive(state, run)
   end
 
-  defp no_messages(), do: []
-  defp default_compaction(messages), do: {:ok, messages}
-  defp default_before_tool(_call), do: :ok
-  defp default_after_tool(_call, body), do: body
-
-  defp drive(state, model_fun, tool_fun, rctx, verbose) do
+  defp drive(state, %Run{ctx: ctx} = run) do
     # A set cancellation token wins, even on a run-completing turn (the cancel
     # may land while the final model call is in flight).
-    if Abort.cancelled?(rctx.abort) do
-      halt_cancelled(state, rctx.emit)
+    if Abort.cancelled?(ctx.abort) do
+      halt_cancelled(state, ctx.emit)
     else
-      step(Loop.next(state), model_fun, tool_fun, rctx, verbose, rctx.emit)
+      step(Loop.next(state), run)
     end
   end
 
   # A normally-completed run can be resumed by follow-up messages, bounded by
   # max_follow_ups so a misbehaving follow-up source cannot loop forever.
-  defp step({:halt, {:ok, _} = result, state}, model_fun, tool_fun, rctx, verbose, _emit) do
-    case rctx.follow_up.() do
+  defp step({:halt, {:ok, _} = result, state}, %Run{} = run) do
+    case run.hooks.follow_up.() do
       contents when contents != [] and state.follow_ups < state.config.max_follow_ups ->
-        rctx.emit.({:follow_up, %{count: length(contents)}})
+        run.ctx.emit.({:follow_up, %{count: length(contents)}})
         state = %{state | follow_ups: state.follow_ups + 1}
-        drive(Loop.inject_user(state, contents), model_fun, tool_fun, rctx, verbose)
+        drive(Loop.inject_user(state, contents), run)
 
       _none_or_capped ->
         {result, state}
     end
   end
 
-  defp step({:halt, result, state}, _model_fun, _tool_fun, _rctx, _verbose, _emit),
-    do: {result, state}
+  defp step({:halt, result, state}, %Run{}), do: {result, state}
 
-  defp step({:call_model, state}, model_fun, tool_fun, rctx, verbose, emit) do
-    state = state |> pull_steering(rctx) |> maybe_compact(rctx)
-    emit.({:status, :thinking})
-    emit.({:request, %{step: state.step}})
+  defp step({:call_model, state}, %Run{ctx: ctx} = run) do
+    state = state |> pull_steering(run) |> maybe_compact(run)
+    ctx.emit.({:status, :thinking})
+    ctx.emit.({:request, %{step: state.step}})
     started = System.monotonic_time(:millisecond)
 
-    case call_model(state, model_fun, rctx, @overflow_retries) do
+    case call_model(state, run, @overflow_retries) do
       {:ok, turn, state} ->
         elapsed = System.monotonic_time(:millisecond) - started
 
-        emit.(
+        ctx.emit.(
           {:response, %{finish_reason: turn.finish_reason, ms: elapsed, tokens: tokens(turn)}}
         )
 
-        emit.({:assistant, summarize(turn)})
-        drive(Loop.apply_turn(state, turn), model_fun, tool_fun, rctx, verbose)
+        ctx.emit.({:assistant, summarize(turn)})
+        drive(Loop.apply_turn(state, turn), run)
 
       {:cancelled, state} ->
-        halt_cancelled(state, emit)
+        halt_cancelled(state, ctx.emit)
 
       {:error, reason, state} ->
-        emit.({:error, reason})
-        drive(Loop.apply_error(state, reason), model_fun, tool_fun, rctx, verbose)
+        ctx.emit.({:error, reason})
+        drive(Loop.apply_error(state, reason), run)
     end
   end
 
-  defp step({:run_tools, calls, state}, model_fun, tool_fun, rctx, verbose, emit) do
-    emit.({:status, :running_tools})
-    results = run_tools(calls, tool_fun, rctx, verbose, state.config)
+  defp step({:run_tools, calls, state}, %Run{} = run) do
+    run.ctx.emit.({:status, :running_tools})
+    results = run_tools(calls, run, state.config)
     # prepare_next_turn can swap the model/context between turns.
-    state = state |> Loop.apply_tool_results(results) |> rctx.prepare_next_turn.()
-    drive(state, model_fun, tool_fun, rctx, verbose)
+    state = state |> Loop.apply_tool_results(results) |> run.hooks.prepare_next_turn.()
+    drive(state, run)
   end
 
-  defp run_tools(calls, tool_fun, rctx, verbose, %{tool_execution: :sequential}) do
-    Enum.map(calls, &run_one(&1, tool_fun, rctx, verbose))
+  defp run_tools(calls, %Run{} = run, %{tool_execution: :sequential}) do
+    Enum.map(calls, &run_one(&1, run))
   end
 
   # Parallel by default (like Pi); results stay in assistant source order via
   # `ordered: true`. The Session opts into :sequential for its shared Lua sandbox.
-  defp run_tools(calls, tool_fun, rctx, verbose, config) do
+  defp run_tools(calls, %Run{} = run, config) do
     calls
-    |> Task.async_stream(&run_one(&1, tool_fun, rctx, verbose),
+    |> Task.async_stream(&run_one(&1, run),
       ordered: true,
       max_concurrency: config.max_tool_concurrency,
       timeout: :infinity
@@ -161,36 +146,36 @@ defmodule Epix.Runner do
     {Loop.result(cancelled), cancelled}
   end
 
-  defp pull_steering(state, rctx) do
-    case rctx.steering.() do
+  defp pull_steering(state, %Run{ctx: ctx, hooks: hooks}) do
+    case hooks.steering.() do
       [] ->
         state
 
       contents ->
-        rctx.emit.({:steering, %{count: length(contents)}})
+        ctx.emit.({:steering, %{count: length(contents)}})
         Loop.inject_user(state, contents)
     end
   end
 
   # Proactive compaction: shrink the context before a model call when the
   # estimated size crosses the configured fraction of the context window.
-  defp maybe_compact(state, rctx) do
+  defp maybe_compact(state, %Run{} = run) do
     limit = trunc(state.config.context_window * state.config.compaction_threshold)
 
     if Loop.estimate_tokens(state.context.messages) > limit do
-      compact(state, rctx, :threshold)
+      compact(state, run, :threshold)
     else
       state
     end
   end
 
-  defp compact(state, rctx, reason) do
+  defp compact(state, %Run{ctx: ctx, hooks: hooks}, reason) do
     before = Loop.estimate_tokens(state.context.messages)
 
-    with {:ok, messages} <- rctx.compaction.(state.context.messages),
+    with {:ok, messages} <- hooks.compaction.(state.context.messages),
          after_tokens = Loop.estimate_tokens(messages),
          true <- after_tokens < before do
-      rctx.emit.({:compaction, %{reason: reason, before: before, after: after_tokens}})
+      ctx.emit.({:compaction, %{reason: reason, before: before, after: after_tokens}})
       Loop.replace_context(state, messages)
     else
       # Compaction failed or did not shrink the context: keep the original so a
@@ -202,10 +187,11 @@ defmodule Epix.Runner do
   # Call the model, recovering from a context overflow by compacting and retrying.
   # `transform_context` rewrites the messages sent to the model non-destructively;
   # the persisted state.context is unchanged (apply_turn appends to the original).
-  defp call_model(state, model_fun, rctx, retries) do
-    send_context = %{state.context | messages: rctx.transform_context.(state.context.messages)}
+  defp call_model(state, %Run{} = run, retries) do
+    messages = run.hooks.transform_context.(state.context.messages)
+    send_context = %{state.context | messages: messages}
 
-    case model_fun.(send_context, state.config, rctx) do
+    case run.model_fun.(send_context, state.config, run.ctx) do
       {:ok, turn} ->
         {:ok, turn, state}
 
@@ -214,10 +200,10 @@ defmodule Epix.Runner do
 
       {:error, reason} ->
         compacted =
-          if retries > 0 and overflow?(reason), do: compact(state, rctx, :overflow), else: state
+          if retries > 0 and overflow?(reason), do: compact(state, run, :overflow), else: state
 
         if compacted != state,
-          do: call_model(compacted, model_fun, rctx, retries - 1),
+          do: call_model(compacted, run, retries - 1),
           else: {:error, reason, state}
     end
   end
@@ -245,22 +231,22 @@ defmodule Epix.Runner do
     subject and limit
   end
 
-  defp run_one(call, tool_fun, rctx, verbose) do
-    log(verbose, "tool #{call.function.name} #{call.function.arguments}")
-    rctx.emit.({:tool_start, %{name: call.function.name}})
-    body = execute_tool(call, tool_fun, rctx)
-    log(verbose, "  -> #{truncate(body)}")
-    rctx.emit.({:tool_result, %{name: call.function.name, body: body}})
+  defp run_one(call, %Run{ctx: ctx} = run) do
+    log(run.verbose, "tool #{call.function.name} #{call.function.arguments}")
+    ctx.emit.({:tool_start, %{name: call.function.name}})
+    body = execute_tool(call, run)
+    log(run.verbose, "  -> #{truncate(body)}")
+    ctx.emit.({:tool_result, %{name: call.function.name, body: body}})
     %{id: call.id, body: body}
   end
 
   # Tool/hook execution is contained: a raise becomes a tool result the model can
   # see rather than crashing the run/Session. Cancellation is honored per tool.
-  defp execute_tool(call, tool_fun, rctx) do
-    if Abort.cancelled?(rctx.abort) do
+  defp execute_tool(call, %Run{ctx: ctx, hooks: hooks} = run) do
+    if Abort.cancelled?(ctx.abort) do
       "Tool not run: cancelled"
     else
-      rctx.after_tool_call.(call, run_or_block(call, tool_fun, rctx))
+      hooks.after_tool_call.(call, run_or_block(call, run))
     end
   rescue
     exception -> "Tool crashed: #{Exception.message(exception)}"
@@ -270,9 +256,9 @@ defmodule Epix.Runner do
 
   # before_tool_call must return :ok or {:block, reason}; anything else fails
   # closed (blocks), so a buggy permission hook never silently allows a tool.
-  defp run_or_block(call, tool_fun, rctx) do
-    case rctx.before_tool_call.(call) do
-      :ok -> tool_fun.(call, rctx)
+  defp run_or_block(call, %Run{ctx: ctx, hooks: hooks, tool_fun: tool_fun}) do
+    case hooks.before_tool_call.(call) do
+      :ok -> tool_fun.(call, ctx)
       {:block, reason} -> "Tool blocked: #{reason}"
       other -> "Tool blocked: before_tool_call returned #{inspect(other)}"
     end
