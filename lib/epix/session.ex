@@ -15,7 +15,7 @@ defmodule Epix.Session do
 
   use GenServer
 
-  alias Epix.{Abort, Compaction, Loop, ModelStream, Runner, SystemPrompt, Tools}
+  alias Epix.{Abort, Compaction, Loop, ModelStream, Runner, SessionStore, SystemPrompt, Tools}
   alias Epix.Loop.Config
   alias Epix.Lua.Sandbox
   alias ReqLLM.{Context, Response}
@@ -36,8 +36,10 @@ defmodule Epix.Session do
   to enable the Lua `kv` API), `:namespaces` (the storage namespaces this agent
   may access, default `[]`), `:web` (enable the Lua `web` API — search and clean
   page fetch — by passing a keyword list of `Epix.Kagi` options, e.g.
-  `Epix.Kagi.from_env()` or `[api_key: key]`), `:max_steps`, `:temperature`,
-  `:max_tokens`,
+  `Epix.Kagi.from_env()` or `[api_key: key]`), `:id` (the session id, default a
+  fresh UUID), `:persist` (an `Epix.Store` to save the session to after each run;
+  if a record already exists under `:id`, the conversation and its namespaces are
+  resumed on start), `:max_steps`, `:temperature`, `:max_tokens`,
   `:receive_timeout` (per-request HTTP timeout, ms, default 60_000), `:verbose`,
   `:system_prompt`, `:name`.
   """
@@ -103,19 +105,31 @@ defmodule Epix.Session do
         }
   def status(session), do: GenServer.call(session, :status)
 
+  @doc "Returns the session id (the key it persists/resumes under)."
+  @spec id(t()) :: String.t()
+  def id(session), do: GenServer.call(session, :id)
+
+  @doc "Forces a save of the session now (no-op unless `:persist` was given)."
+  @spec save(t()) :: :ok
+  def save(session), do: GenServer.call(session, :save)
+
   # --- server ---
 
   @impl true
   def init(opts) do
+    id = opts[:id] || generate_id()
+    persist = opts[:persist]
+    sandbox = opts[:sandbox] || start_sandbox!(opts)
+
     system =
       opts[:system_prompt] ||
         SystemPrompt.build(storage: opts[:store] != nil, web: is_list(opts[:web]))
 
-    context = Context.new([Context.system(system)])
-
     state = %{
-      sandbox: opts[:sandbox] || start_sandbox!(opts),
-      context: context,
+      id: id,
+      persist: persist,
+      sandbox: sandbox,
+      context: restore_or_new(persist, id, sandbox, system),
       config: build_config(opts),
       verbose: opts[:verbose] || false,
       # Effect overrides (advanced/testing): a custom model_fun/tool_fun replaces
@@ -126,6 +140,22 @@ defmodule Epix.Session do
     }
 
     {:ok, state}
+  end
+
+  # A new session starts with just the system prompt. A persisted one is resumed:
+  # its saved conversation is restored and its granted namespaces re-applied (the
+  # kv data those namespaces hold persisted on their own).
+  defp restore_or_new(nil, _id, _sandbox, system), do: Context.new([Context.system(system)])
+
+  defp restore_or_new(persist, id, sandbox, system) do
+    case SessionStore.load(persist, id) do
+      nil ->
+        Context.new([Context.system(system)])
+
+      record ->
+        if record.namespaces != [], do: Sandbox.set_namespaces(sandbox, record.namespaces)
+        Context.new(record.messages)
+    end
   end
 
   # Numeric/threshold defaults come from the Config struct; opts override them.
@@ -144,6 +174,26 @@ defmodule Epix.Session do
 
   defp model_id(model) when is_struct(model), do: Map.get(model, :id)
   defp model_id(_model), do: nil
+
+  @doc "Generates a random session id (UUID v4)."
+  @spec generate_id() :: String.t()
+  def generate_id() do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+    c = Bitwise.bor(Bitwise.band(c, 0x0FFF), 0x4000)
+    d = Bitwise.bor(Bitwise.band(d, 0x3FFF), 0x8000)
+
+    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+    |> IO.iodata_to_binary()
+  end
+
+  defp persist(%{persist: nil}), do: :ok
+
+  defp persist(%{persist: store, id: id, context: context, sandbox: sandbox}) do
+    SessionStore.save(store, id, %{
+      messages: context.messages,
+      namespaces: Sandbox.namespaces(sandbox)
+    })
+  end
 
   @impl true
   def handle_call({:run, _prompt, _opts}, _from, %{run: run} = state) when run != nil do
@@ -202,7 +252,16 @@ defmodule Epix.Session do
 
   def handle_call(:reset, _from, state) do
     [system | _rest] = state.context.messages
-    {:reply, :ok, %{state | context: Context.new([system])}}
+    state = %{state | context: Context.new([system])}
+    persist(state)
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:id, _from, state), do: {:reply, state.id, state}
+
+  def handle_call(:save, _from, state) do
+    persist(state)
+    {:reply, :ok, state}
   end
 
   def handle_call(:status, _from, state) do
@@ -221,7 +280,9 @@ defmodule Epix.Session do
     GenServer.reply(run.from, result)
     Process.demonitor(run.ref, [:flush])
     Agent.stop(run.steer)
-    {:noreply, %{state | context: context, run: nil}}
+    state = %{state | context: context, run: nil}
+    persist(state)
+    {:noreply, state}
   end
 
   # The run process crashed before reporting (safe_run should prevent this).

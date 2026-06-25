@@ -23,20 +23,32 @@ defmodule BasicWeb.Live do
   alias Solve.{Message, Update}
 
   @impl true
-  def mount(_params, _session, socket) do
-    socket = assign(socket, app: nil, messages: [], status: :idle, log: [], input: "")
+  def mount(params, _session, socket) do
+    socket = assign(socket, app: nil, session_id: nil, messages: [], status: :idle, log: [], input: "")
 
     if connected?(socket) do
-      # One Epix session per browser connection, linked to this LiveView process
-      # so it is torn down when the tab closes.
-      {:ok, app} = Epix.Chat.App.start_link(params: %{session_opts: session_opts()})
+      # `?session=<uuid>` resumes that session (conversation + its kv namespace);
+      # otherwise a fresh id is minted and pushed into the URL so a reload resumes.
+      resume_id = params["session"]
+      id = resume_id || Epix.Session.generate_id()
+
+      # One Epix session per browser connection, linked to this LiveView process.
+      {:ok, app} = Epix.Chat.App.start_link(params: %{session_opts: session_opts(id)})
       exposed = Solve.subscribe(app, :chat, self())
 
-      {:ok, assign(socket, app: app, messages: exposed.messages, status: exposed.status, log: exposed.log)}
+      socket =
+        socket
+        |> assign(app: app, session_id: id, messages: exposed.messages, status: exposed.status, log: exposed.log)
+        |> then(fn s -> if resume_id, do: s, else: push_patch(s, to: "/?session=#{id}") end)
+
+      {:ok, socket}
     else
       {:ok, socket}
     end
   end
+
+  @impl true
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("change", %{"text" => text}, socket) do
@@ -62,15 +74,16 @@ defmodule BasicWeb.Live do
 
   def handle_info(_other, socket), do: {:noreply, socket}
 
-  # Each connection's agent gets the shared store, its own private namespace, and
-  # web search/fetch (Kagi). It discovers the namespace via `list_namespaces`.
-  defp session_opts do
-    namespace = "agent-local:" <> Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
-
+  # The session is keyed by `id`: it persists to the store (so it can resume), its
+  # private kv namespace is `agent:<id>`, and it gets web search/fetch (Kagi). The
+  # agent discovers its namespace via `list_namespaces`.
+  defp session_opts(id) do
     model_opts() ++
       [
+        id: id,
         store: BasicWeb.Store,
-        namespaces: [namespace],
+        persist: BasicWeb.Store,
+        namespaces: ["agent:" <> id],
         web: Epix.Kagi.from_env()
       ]
   end
@@ -99,6 +112,8 @@ defmodule BasicWeb.Live do
           padding: 12px 18px; background: #0f172a; color: #f8fafc;
         }
         .topbar .title { font-weight: 600; letter-spacing: .02em; }
+        .meta { display: inline-flex; align-items: center; gap: 16px; }
+        .session { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #64748b; }
         .status { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; text-transform: capitalize; color: #cbd5e1; }
         .status .dot { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
         .status-idle .dot { background: #22c55e; }
@@ -152,7 +167,10 @@ defmodule BasicWeb.Live do
 
       <header class="topbar">
         <span class="title">Epix · basic web</span>
-        <span class={"status status-#{@status}"}><span class="dot"></span><%= @status %></span>
+        <span class="meta">
+          <span class="session" title="reload this page to resume this session"><%= @session_id %></span>
+          <span class={"status status-#{@status}"}><span class="dot"></span><%= @status %></span>
+        </span>
       </header>
 
       <div class="body">
