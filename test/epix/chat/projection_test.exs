@@ -58,11 +58,32 @@ defmodule Epix.Chat.ProjectionTest do
   end
 
   test "finish ok marks idle and logs done; finish error records an error", %{state: state} do
-    assert Projection.finish(%{state | status: :thinking}, {:ok, "done"}).status == :idle
+    done = Projection.finish(%{state | status: :thinking}, {:ok, "done"})
+    assert done.status == :idle
+    assert "■ done" in done.log
 
     state = Projection.finish(state, {:error, :timeout})
     assert state.status == :idle
     assert [%{role: :error, text: "error: :timeout"}] = state.messages
     assert "✗ :timeout" in state.log
+  end
+
+  test "events without an explicit clause are ignored (state unchanged)", %{state: state} do
+    for event <- [
+          {:steering, %{count: 1}},
+          {:follow_up, %{count: 1}},
+          {:text_delta, "x"},
+          {:cancelled, %{step: 2}}
+        ] do
+      assert Projection.apply_event(state, event) == state
+    end
+  end
+
+  test "first_line truncates a long tool body to 80 chars in the transcript", %{state: state} do
+    body = String.duplicate("x", 200)
+    state = Projection.apply_event(state, {:tool_result, %{name: "t", body: body}})
+    [%{role: :activity, text: text}] = state.messages
+    # "✓ t: " prefix + 80 sliced chars
+    assert text == "✓ t: " <> String.duplicate("x", 80)
   end
 end

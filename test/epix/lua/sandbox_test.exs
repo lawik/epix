@@ -23,6 +23,12 @@ defmodule Epix.Lua.SandboxTest do
       assert {:ok, "4"} = Sandbox.eval(s, "return math.floor(4.7)")
     end
 
+    test "formats no/single/multiple return values", %{sandbox: s} do
+      assert {:ok, "nil"} = Sandbox.eval(s, "return")
+      assert {:ok, ~s("hi")} = Sandbox.eval(s, "return 'hi'")
+      assert {:ok, "[1, 2, 3]"} = Sandbox.eval(s, "return 1, 2, 3")
+    end
+
     test "blocks dangerous libraries", %{sandbox: s} do
       assert {:error, _} = Sandbox.eval(s, "return os.getenv('HOME')")
     end
