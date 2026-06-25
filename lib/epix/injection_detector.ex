@@ -189,6 +189,10 @@ defmodule Epix.InjectionDetector do
     * `:api_key`         — provider API key
     * `:max_tokens`      — response cap (default 256)
     * `:receive_timeout` — per-request HTTP timeout in ms (default 30_000)
+    * `:max_retries`     — transient-error retries (default 1). The detector sits
+      synchronously in the fetch path, so latency is kept bounded: a slow or hung
+      provider should surface as `{:detector_unavailable, _}` promptly rather than
+      retry (req_llm's default is 3) into a multi-minute stall.
     * `:generate`        — (testing) a `(model, context, keyword) -> {:ok,
       ReqLLM.Response.t()} | {:error, term()}` override for the provider call,
       so the interpretation logic can be exercised without a real model
@@ -211,7 +215,8 @@ defmodule Epix.InjectionDetector do
       api_key: api_key,
       temperature: 0.0,
       max_tokens: Keyword.get(opts, :max_tokens, 256),
-      receive_timeout: Keyword.get(opts, :receive_timeout, 30_000)
+      receive_timeout: Keyword.get(opts, :receive_timeout, 30_000),
+      max_retries: Keyword.get(opts, :max_retries, 1)
     ]
 
     case generate.(model, context, request_opts) do

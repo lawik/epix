@@ -205,6 +205,8 @@ defmodule Epix.InjectionDetectorTest do
       assert opts[:tool_choice] == :required
       assert [%ReqLLM.Tool{name: "prompt_detected"}] = opts[:tools]
       assert is_integer(opts[:max_tokens])
+      # Bounded latency: a guard in the fetch path must not retry into a stall.
+      assert opts[:max_retries] <= 1
     end
   end
 
