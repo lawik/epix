@@ -41,14 +41,25 @@ defmodule Epix.Lua.Sandbox do
   @spec list_tools(GenServer.server()) :: [map()]
   def list_tools(server), do: GenServer.call(server, :list_tools)
 
+  @doc "Replaces the set of namespaces the agent's Lua may access."
+  @spec set_namespaces(GenServer.server(), [String.t()]) :: :ok
+  def set_namespaces(server, namespaces),
+    do: GenServer.call(server, {:set_namespaces, namespaces})
+
+  @doc "Returns the namespaces currently accessible to the agent's Lua."
+  @spec namespaces(GenServer.server()) :: [String.t()]
+  def namespaces(server), do: GenServer.call(server, :namespaces)
+
   # --- server ---
 
   @impl true
-  def init(_opts), do: {:ok, %{tools: %{}}}
+  def init(opts) do
+    {:ok, %{tools: %{}, store: opts[:store], namespaces: opts[:namespaces] || []}}
+  end
 
   @impl true
   def handle_call({:eval, code}, _from, state) do
-    {:reply, Runtime.eval(code), state}
+    {:reply, Runtime.eval(code, lua_ctx(state)), state}
   end
 
   def handle_call({:define_tool, name, description, params, code}, _from, state) do
@@ -66,7 +77,7 @@ defmodule Epix.Lua.Sandbox do
   def handle_call({:run_tool, name, args}, _from, state) do
     case Map.fetch(state.tools, name) do
       {:ok, %{params: params, code: code}} ->
-        {:reply, Runtime.run_tool(params, code, normalize_args(args)), state}
+        {:reply, Runtime.run_tool(params, code, normalize_args(args), lua_ctx(state)), state}
 
       :error ->
         {:reply,
@@ -83,6 +94,19 @@ defmodule Epix.Lua.Sandbox do
 
     {:reply, tools, state}
   end
+
+  def handle_call({:set_namespaces, namespaces}, _from, state) do
+    {:reply, :ok, %{state | namespaces: namespaces}}
+  end
+
+  def handle_call(:namespaces, _from, state), do: {:reply, state.namespaces, state}
+
+  # The `store` API is installed only when a store is configured; the granted
+  # namespaces are snapshotted into each eval.
+  defp lua_ctx(%{store: nil}), do: nil
+
+  defp lua_ctx(%{store: store, namespaces: namespaces}),
+    do: %{store: store, namespaces: namespaces}
 
   defp normalize_params(nil), do: []
   defp normalize_params(params) when is_list(params), do: Enum.map(params, &to_string/1)

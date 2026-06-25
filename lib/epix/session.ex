@@ -4,14 +4,13 @@ defmodule Epix.Session do
 
   Owns the Lua sandbox and the running conversation context, and assembles the
   real effects (the req_llm model call and tool dispatch into the sandbox) that
-  `Epix.Runner` drives. A plain `GenServer` for now, exposing `context/1` and
-  `sandbox/1`. This is the seam where a `Solve` controller could later project
-  richer session state to a TUI, GUI, API, or MCP frontend.
+  `Epix.Runner` drives. A plain `GenServer`, exposing `context/1`, `sandbox/1`, and
+  the storage-namespace controls. This is the seam where a `Solve` controller could
+  project richer session state to a frontend.
 
-  Blocking note: a run occupies the GenServer until it finishes (`run/3` is a
-  `:infinity` call), so cancellation/steering must be driven out of band via the
-  `:abort`/`:steering` options rather than a separate call. Moving the run off the
-  call path (a Task + reply-later) is the next step to expose `cancel/1`/`steer/2`.
+  The run executes off the GenServer call path (in a monitored worker, replying
+  via `GenServer.reply` when done), so the Session stays responsive during a run:
+  `cancel/1`, `steer/2`, `set_namespaces/2`, and `context/1` are answerable mid-run.
   """
 
   use GenServer
@@ -28,9 +27,11 @@ defmodule Epix.Session do
   @doc """
   Starts a session.
 
-  Options: `:model`, `:api_key`, `:sandbox` (reuse one), `:max_steps`,
-  `:temperature`, `:max_tokens`, `:receive_timeout` (per-request HTTP timeout, ms,
-  default 60_000), `:verbose`, `:system_prompt`, `:name`.
+  Options: `:model`, `:api_key`, `:sandbox` (reuse one), `:store` (an `Epix.Store`
+  to enable the Lua `store` API), `:namespaces` (the storage namespaces this agent
+  may access, default `[]`), `:max_steps`, `:temperature`, `:max_tokens`,
+  `:receive_timeout` (per-request HTTP timeout, ms, default 60_000), `:verbose`,
+  `:system_prompt`, `:name`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -69,14 +70,24 @@ defmodule Epix.Session do
   @spec sandbox(t()) :: pid()
   def sandbox(session), do: GenServer.call(session, :sandbox)
 
+  @doc "Replaces the storage namespaces this agent's Lua may access (effective immediately)."
+  @spec set_namespaces(t(), [String.t()]) :: :ok
+  def set_namespaces(session, namespaces),
+    do: GenServer.call(session, {:set_namespaces, namespaces})
+
+  @doc "Returns the storage namespaces currently accessible to the agent."
+  @spec namespaces(t()) :: [String.t()]
+  def namespaces(session), do: GenServer.call(session, :namespaces)
+
   # --- server ---
 
   @impl true
   def init(opts) do
-    context = Context.new([Context.system(opts[:system_prompt] || SystemPrompt.build())])
+    system = opts[:system_prompt] || SystemPrompt.build(storage: opts[:store] != nil)
+    context = Context.new([Context.system(system)])
 
     state = %{
-      sandbox: opts[:sandbox] || start_sandbox!(),
+      sandbox: opts[:sandbox] || start_sandbox!(opts),
       context: context,
       config: build_config(opts),
       verbose: opts[:verbose] || false,
@@ -96,7 +107,7 @@ defmodule Epix.Session do
   # sandbox registry (define then run); callers can opt into :parallel.
   defp build_config(opts) do
     opts
-    |> Keyword.put_new_lazy(:model, &Model.berget/0)
+    |> Keyword.put_new_lazy(:model, &Model.default/0)
     |> Keyword.put_new_lazy(:api_key, &Model.api_key/0)
     |> Keyword.put_new_lazy(:tools, &Tools.specs/0)
     |> Keyword.put_new(:tool_execution, :sequential)
@@ -145,6 +156,14 @@ defmodule Epix.Session do
 
   def handle_call(:context, _from, state), do: {:reply, state.context, state}
   def handle_call(:sandbox, _from, state), do: {:reply, state.sandbox, state}
+
+  def handle_call({:set_namespaces, namespaces}, _from, state) do
+    {:reply, Sandbox.set_namespaces(state.sandbox, namespaces), state}
+  end
+
+  def handle_call(:namespaces, _from, state) do
+    {:reply, Sandbox.namespaces(state.sandbox), state}
+  end
 
   @impl true
   def handle_info({:run_done, result, context}, %{run: run} = state) when run != nil do
@@ -281,8 +300,8 @@ defmodule Epix.Session do
     end
   end
 
-  defp start_sandbox!() do
-    {:ok, pid} = Sandbox.start_link()
+  defp start_sandbox!(opts) do
+    {:ok, pid} = Sandbox.start_link(store: opts[:store], namespaces: opts[:namespaces] || [])
     pid
   end
 end

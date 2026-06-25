@@ -62,4 +62,14 @@ defmodule Epix.ToolsTest do
   test "a sandbox error is surfaced as an error tuple", %{sandbox: s} do
     assert {:error, _message} = Tools.dispatch("lua_eval", %{"code" => "return ("}, s)
   end
+
+  test "list_namespaces reflects the sandbox's granted namespaces", %{sandbox: s} do
+    assert {:ok, "No namespaces are currently accessible."} =
+             Tools.dispatch("list_namespaces", %{}, s)
+
+    Sandbox.set_namespaces(s, ["user:5", "proj"])
+    assert {:ok, listing} = Tools.dispatch("list_namespaces", %{}, s)
+    assert listing =~ "user:5"
+    assert listing =~ "proj"
+  end
 end

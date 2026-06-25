@@ -8,8 +8,20 @@ defmodule EpixTest do
     assert prompt =~ "lua_define_tool"
   end
 
-  test "tool specs expose the four meta-tools" do
+  test "the system prompt documents the store API only when storage is enabled" do
+    refute Epix.SystemPrompt.build(storage: false) =~ "store.put"
+    assert Epix.SystemPrompt.build(storage: true) =~ "store.put"
+  end
+
+  test "tool specs expose the meta-tools, including list_namespaces" do
     names = Epix.Tools.specs() |> Enum.map(& &1.name) |> Enum.sort()
-    assert names == ["lua_define_tool", "lua_eval", "lua_list_tools", "lua_run_tool"]
+
+    assert names == [
+             "list_namespaces",
+             "lua_define_tool",
+             "lua_eval",
+             "lua_list_tools",
+             "lua_run_tool"
+           ]
   end
 end

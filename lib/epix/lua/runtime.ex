@@ -9,14 +9,16 @@ defmodule Epix.Lua.Runtime do
   Results and errors are returned as strings ready to hand back to the model.
   """
 
-  alias Epix.Lua.HostApi
+  alias Epix.Lua.{HostApi, StoreApi}
 
   @type result :: {:ok, String.t()} | {:error, String.t()}
+  # nil = no storage; otherwise the store + granted namespaces for the `store` API.
+  @type ctx :: nil | StoreApi.ctx()
 
   @doc "Evaluates a one-shot Lua snippet. Use `return X` to produce a result."
-  @spec eval(String.t()) :: result()
-  def eval(code) when is_binary(code) do
-    run(fn -> Lua.eval!(build(), code) end)
+  @spec eval(String.t(), ctx()) :: result()
+  def eval(code, ctx \\ nil) when is_binary(code) do
+    run(fn -> Lua.eval!(build(ctx), code) end)
   end
 
   @doc """
@@ -29,17 +31,18 @@ defmodule Epix.Lua.Runtime do
   def validate_tool(params, code) when is_list(params) and is_binary(code) do
     script = wrap(params, code) <> "\nreturn true"
 
-    case run(fn -> Lua.eval!(build(), script) end) do
+    case run(fn -> Lua.eval!(build(nil), script) end) do
       {:ok, _} -> :ok
       {:error, message} -> {:error, message}
     end
   end
 
   @doc "Runs a stored tool body with the given argument map (string keys)."
-  @spec run_tool([String.t()], String.t(), map()) :: result()
-  def run_tool(params, code, args) when is_list(params) and is_binary(code) and is_map(args) do
+  @spec run_tool([String.t()], String.t(), map(), ctx()) :: result()
+  def run_tool(params, code, args, ctx \\ nil)
+      when is_list(params) and is_binary(code) and is_map(args) do
     lua =
-      Enum.reduce(params, build(), fn p, acc ->
+      Enum.reduce(params, build(ctx), fn p, acc ->
         Lua.set!(acc, ["__args", p], Map.get(args, p))
       end)
 
@@ -48,7 +51,8 @@ defmodule Epix.Lua.Runtime do
     run(fn -> Lua.eval!(lua, script) end)
   end
 
-  defp build(), do: HostApi.install(Lua.new())
+  defp build(nil), do: HostApi.install(Lua.new())
+  defp build(ctx), do: HostApi.install(Lua.new()) |> StoreApi.install(ctx)
 
   defp wrap(params, code) do
     "local function __tool(#{Enum.join(params, ", ")})\n#{code}\nend\n"

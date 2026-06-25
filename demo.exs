@@ -1,4 +1,4 @@
-# Live end-to-end demo against Berget GLM-5.2.
+# Live end-to-end demo against the configured model (see Epix.Model / EPIX_* env).
 # Run: source .envrc && mix run demo.exs
 Logger.configure(level: :info)
 

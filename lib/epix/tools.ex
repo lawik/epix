@@ -70,6 +70,13 @@ defmodule Epix.Tools do
         name: "lua_list_tools",
         description: "List the Lua tools that have been defined so far.",
         parameter_schema: %{"type" => "object", "properties" => %{}}
+      ),
+      tool!(
+        name: "list_namespaces",
+        description:
+          "List the storage namespaces you can currently access. Pass one of these " <>
+            "as the `namespace` argument to the `store.*` functions in your Lua.",
+        parameter_schema: %{"type" => "object", "properties" => %{}}
       )
     ]
   end
@@ -106,6 +113,13 @@ defmodule Epix.Tools do
          Enum.map_join(tools, "\n", fn t ->
            "- #{t.name}(#{Enum.join(t.params, ", ")}): #{t.description}"
          end)}
+    end
+  end
+
+  def dispatch("list_namespaces", _args, sandbox) do
+    case Sandbox.namespaces(sandbox) do
+      [] -> {:ok, "No namespaces are currently accessible."}
+      namespaces -> {:ok, Enum.map_join(namespaces, "\n", &"- #{&1}")}
     end
   end
 

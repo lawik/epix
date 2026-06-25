@@ -80,6 +80,7 @@ defmodule Epix.MixProject do
   defp deps do
     [
       {:lua, "~> 0.4"},
+      {:cubdb, "~> 2.0"},
       {:solve, "~> 0.2"},
       {:nstandard, "~> 0.5", runtime: false},
       {:req_llm, "~> 1.0"},
