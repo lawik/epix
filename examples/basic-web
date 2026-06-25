@@ -6,7 +6,9 @@
 # The page tracks the Solve controller's exposed state (the conversation + a
 # background activity log) and sends prompts back through Solve.dispatch.
 #
-#   source .envrc && ./examples/basic-web     # needs EPIX_MODEL / EPIX_API_KEY
+# Each agent is granted kv storage (a private namespace) and web search/fetch.
+#
+#   source .envrc && ./examples/basic-web     # EPIX_MODEL / EPIX_API_KEY, KAGI_API_KEY for web
 #
 # then open http://localhost:4000
 
@@ -60,7 +62,20 @@ defmodule BasicWeb.Live do
 
   def handle_info(_other, socket), do: {:noreply, socket}
 
+  # Each connection's agent gets the shared store, its own private namespace, and
+  # web search/fetch (Kagi). It discovers the namespace via `list_namespaces`.
   defp session_opts do
+    namespace = "agent-local:" <> Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+
+    model_opts() ++
+      [
+        store: BasicWeb.Store,
+        namespaces: [namespace],
+        web: Epix.Kagi.from_env()
+      ]
+  end
+
+  defp model_opts do
     Epix.Model.from_env()
   rescue
     _ -> []
@@ -181,6 +196,10 @@ defmodule BasicWeb.Live do
   defp role_label(:error), do: "error"
   defp role_label(_other), do: ""
 end
+
+# Shared CubDB-backed store for every agent's kv namespaces (persists in /tmp).
+{:ok, _store} =
+  Epix.Store.start_link(name: BasicWeb.Store, dir: Path.join(System.tmp_dir!(), "epix-basic-web-store"))
 
 # live_reload re-evaluates this whole script on changes, which would re-run
 # Mix.install and re-`defmodule` — so it is off here; edit and restart instead.
