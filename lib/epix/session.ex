@@ -16,7 +16,7 @@ defmodule Epix.Session do
 
   use GenServer
 
-  alias Epix.{Compaction, Loop, Model, ModelStream, Runner, SystemPrompt, Tools}
+  alias Epix.{Abort, Compaction, Loop, Model, ModelStream, Runner, SystemPrompt, Tools}
   alias Epix.Loop.Config
   alias Epix.Lua.Sandbox
   alias ReqLLM.{Context, Response}
@@ -41,11 +41,25 @@ defmodule Epix.Session do
   @doc """
   Sends a user prompt and runs the loop to completion.
 
-  Options: `:emit` (`Epix.Event.emit`) to observe progress during the run.
+  The caller blocks until the run finishes, but the run executes off the GenServer
+  call path, so `cancel/1` and `steer/2` (and `context/1`) are answerable mid-run
+  from another process. Only one run at a time; a second returns `{:error, :busy}`.
+
+  Options: `:emit` (`Epix.Event.emit`) plus any `Epix.Runner` hook options. The
+  Session owns the `:abort`/`:steering` machinery, so those are driven via
+  `cancel/1`/`steer/2`, not options.
   """
-  @spec run(t(), String.t(), keyword()) :: Loop.result()
+  @spec run(t(), String.t(), keyword()) :: Loop.result() | {:error, :busy}
   def run(session, prompt, opts \\ []),
     do: GenServer.call(session, {:run, prompt, opts}, :infinity)
+
+  @doc "Cancels the in-flight run, if any. Returns `:ok` or `{:error, :idle}`."
+  @spec cancel(t()) :: :ok | {:error, :idle}
+  def cancel(session), do: GenServer.call(session, :cancel)
+
+  @doc "Injects a user message into the in-flight run before its next model call."
+  @spec steer(t(), String.t()) :: :ok | {:error, :idle}
+  def steer(session, message), do: GenServer.call(session, {:steer, message})
 
   @doc "Returns the current conversation context."
   @spec context(t()) :: Context.t()
@@ -65,7 +79,12 @@ defmodule Epix.Session do
       sandbox: opts[:sandbox] || start_sandbox!(),
       context: context,
       config: build_config(opts),
-      verbose: opts[:verbose] || false
+      verbose: opts[:verbose] || false,
+      # Effect overrides (advanced/testing): a custom model_fun/tool_fun replaces
+      # the real req_llm/sandbox effects, making the orchestration testable offline.
+      model_fun: opts[:model_fun],
+      tool_fun: opts[:tool_fun],
+      run: nil
     }
 
     {:ok, state}
@@ -85,40 +104,93 @@ defmodule Epix.Session do
   end
 
   @impl true
-  def handle_call({:run, prompt, opts}, _from, %{config: config} = state) do
-    context = Context.append(state.context, Context.user(prompt))
-    loop_state = Loop.init(context, config)
+  def handle_call({:run, _prompt, _opts}, _from, %{run: run} = state) when run != nil do
+    {:reply, {:error, :busy}, state}
+  end
 
-    run_opts =
-      [
-        verbose: state.verbose,
-        compaction: Keyword.get(opts, :compaction, compaction_fun(config))
-      ] ++
-        Keyword.take(opts, [
-          :emit,
-          :abort,
-          :steering,
-          :follow_up,
-          :transform_context,
-          :before_tool_call,
-          :after_tool_call,
-          :prepare_next_turn
-        ])
+  def handle_call({:run, prompt, opts}, from, %{config: config} = state) do
+    loop_state = Loop.init(Context.append(state.context, Context.user(prompt)), config)
+    abort = Abort.new()
+    {:ok, steer} = Agent.start_link(fn -> [] end)
+    run_opts = run_opts(state, config, opts, abort, steer)
+    session = self()
 
-    # Contain a crashing run (e.g. a raising hook outside tool dispatch) so it
-    # returns an error and the session keeps its conversation rather than dying.
-    {result, final} =
-      Runner.run(loop_state, model_fun(config), tool_fun(state.sandbox), run_opts)
+    model_fun = state.model_fun || model_fun(config)
+    tool_fun = state.tool_fun || tool_fun(state.sandbox)
 
-    {:reply, result, %{state | context: final.context}}
-  rescue
-    exception -> {:reply, {:error, {:run_crashed, Exception.message(exception)}}, state}
-  catch
-    kind, reason -> {:reply, {:error, {:run_crashed, {kind, reason}}}, state}
+    {pid, ref} =
+      spawn_monitor(fn ->
+        {result, final} = safe_run(loop_state, model_fun, tool_fun, run_opts)
+        send(session, {:run_done, result, final.context})
+      end)
+
+    {:noreply, %{state | run: %{from: from, pid: pid, ref: ref, abort: abort, steer: steer}}}
+  end
+
+  def handle_call(:cancel, _from, %{run: nil} = state), do: {:reply, {:error, :idle}, state}
+
+  def handle_call(:cancel, _from, %{run: run} = state) do
+    Abort.cancel(run.abort)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:steer, _message}, _from, %{run: nil} = state) do
+    {:reply, {:error, :idle}, state}
+  end
+
+  def handle_call({:steer, message}, _from, %{run: run} = state) do
+    Agent.update(run.steer, &(&1 ++ [message]))
+    {:reply, :ok, state}
   end
 
   def handle_call(:context, _from, state), do: {:reply, state.context, state}
   def handle_call(:sandbox, _from, state), do: {:reply, state.sandbox, state}
+
+  @impl true
+  def handle_info({:run_done, result, context}, %{run: run} = state) when run != nil do
+    GenServer.reply(run.from, result)
+    Process.demonitor(run.ref, [:flush])
+    Agent.stop(run.steer)
+    {:noreply, %{state | context: context, run: nil}}
+  end
+
+  # The run process crashed before reporting (safe_run should prevent this).
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{run: %{ref: ref} = run} = state) do
+    GenServer.reply(run.from, {:error, {:run_crashed, reason}})
+    Agent.stop(run.steer)
+    {:noreply, %{state | run: nil}}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  # The Session owns abort + steering so cancel/2 and steer/2 work; the caller's
+  # other hook options pass through.
+  defp run_opts(state, config, opts, abort, steer) do
+    [
+      verbose: state.verbose,
+      abort: abort,
+      steering: fn -> Agent.get_and_update(steer, &{&1, []}) end,
+      compaction: Keyword.get(opts, :compaction, compaction_fun(config))
+    ] ++
+      Keyword.take(opts, [
+        :emit,
+        :follow_up,
+        :transform_context,
+        :before_tool_call,
+        :after_tool_call,
+        :prepare_next_turn
+      ])
+  end
+
+  # Contain a crashing run (e.g. a raising hook outside tool dispatch) so it
+  # returns an error and the session keeps its conversation rather than dying.
+  defp safe_run(loop_state, model_fun, tool_fun, run_opts) do
+    Runner.run(loop_state, model_fun, tool_fun, run_opts)
+  rescue
+    exception -> {{:error, {:run_crashed, Exception.message(exception)}}, loop_state}
+  catch
+    kind, reason -> {{:error, {:run_crashed, {kind, reason}}}, loop_state}
+  end
 
   # --- effects (the imperative boundary) ---
 
