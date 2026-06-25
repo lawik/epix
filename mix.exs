@@ -83,6 +83,7 @@ defmodule Epix.MixProject do
       {:solve, "~> 0.2"},
       {:nstandard, "~> 0.5", runtime: false},
       {:req_llm, "~> 1.0"},
+      {:req, "~> 0.6"},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
