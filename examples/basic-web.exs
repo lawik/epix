@@ -183,4 +183,5 @@ end
 
 # live_reload re-evaluates this whole script on changes, which would re-run
 # Mix.install and re-`defmodule` — so it is off here; edit and restart instead.
-PhoenixPlayground.start(live: BasicWeb.Live, live_reload: false)
+# open_browser is off so running this does not pop a browser tab.
+PhoenixPlayground.start(live: BasicWeb.Live, live_reload: false, open_browser: false)
