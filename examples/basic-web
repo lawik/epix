@@ -1,3 +1,4 @@
+#!/usr/bin/env elixir
 # Basic web UI for an Epix agent, as a single self-contained script.
 #
 # It installs Epix as a path dependency and uses phoenix_playground to run a
@@ -5,7 +6,7 @@
 # The page tracks the Solve controller's exposed state (the conversation + a
 # background activity log) and sends prompts back through Solve.dispatch.
 #
-#   source .envrc && elixir examples/basic-web.exs     # needs EPIX_MODEL / EPIX_API_KEY
+#   source .envrc && ./examples/basic-web     # needs EPIX_MODEL / EPIX_API_KEY
 #
 # then open http://localhost:4000
 
