@@ -19,8 +19,9 @@ defmodule Epix.Tools do
         name: "lua_eval",
         description:
           "Evaluate a one-shot Lua snippet in the sandbox and return its result. " <>
-            "Use `return X` to produce output. The `host` API is available. " <>
-            "Compile and runtime errors are returned so you can fix and retry.",
+            "Use `return X` to produce output. The sandbox APIs documented in the " <>
+            "system prompt are available. Compile and runtime errors are returned " <>
+            "so you can fix and retry.",
         parameter_schema: %{
           "type" => "object",
           "properties" => %{
@@ -33,8 +34,9 @@ defmodule Epix.Tools do
         name: "lua_define_tool",
         description:
           "Define a reusable Lua tool and store it for later use. The body is a Lua " <>
-            "function body: parameters are in scope as locals, the `host` API is " <>
-            "available, and `return` produces the result. Validated for compile errors.",
+            "function body: parameters are in scope as locals, the sandbox APIs " <>
+            "documented in the system prompt are available, and `return` produces " <>
+            "the result. Validated for compile errors.",
         parameter_schema: %{
           "type" => "object",
           "properties" => %{
@@ -74,8 +76,8 @@ defmodule Epix.Tools do
       tool!(
         name: "list_namespaces",
         description:
-          "List the storage namespaces you can currently access. Pass one of these " <>
-            "as the `namespace` argument to the `store.*` functions in your Lua.",
+          "List the namespaces you can currently access. Pass one as the " <>
+            "`namespace` argument to the `kv.*` and `fs.*` functions in your Lua.",
         parameter_schema: %{"type" => "object", "properties" => %{}}
       )
     ]
