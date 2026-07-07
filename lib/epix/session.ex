@@ -28,7 +28,7 @@ defmodule Epix.Session do
   }
 
   alias Epix.Loop.Config
-  alias Epix.Lua.{GitApi, Sandbox}
+  alias Epix.Lua.{FsApi, GitApi, Sandbox}
   alias ReqLLM.{Context, Response}
 
   require Logger
@@ -51,7 +51,10 @@ defmodule Epix.Session do
   page fetch — by passing a keyword list of `Epix.Kagi` options, e.g.
   `Epix.Kagi.from_env()` or `[api_key: key]`), `:git` (enable the Lua `git` API by
   passing a list of repo grants, each `%{name:, dir:, writable:}` — see
-  `Epix.Lua.GitApi`; disabled with a warning if the host has no `git` executable),
+  `Epix.Lua.GitApi`), `:fs` (enable the Lua `fs` API — a virtual filesystem, one
+  bare repo per namespace under a root dir — by passing the root path, e.g.
+  `fs: "/var/epix/fs"`; see `Epix.Lua.FsApi`). Both `:git` and `:fs` are backed by
+  the `git` executable and are disabled with a warning when the host has none.
   `:id` (the session id, default a
   fresh UUID), `:persist` (a base directory; the session is saved to its **own**
   CubDB at `<dir>/<id>` — a separate backend from any kv `:store` — after each run
@@ -137,12 +140,15 @@ defmodule Epix.Session do
     id = opts[:id] || generate_id()
     sandbox = opts[:sandbox] || start_sandbox!(opts)
 
+    caps = capabilities(opts)
+
     system =
       opts[:system_prompt] ||
         SystemPrompt.build(
           storage: opts[:store] != nil,
           web: is_list(opts[:web]),
-          git: git_enabled?(opts)
+          git: caps.git,
+          fs: caps.fs
         )
 
     # The session's own storage backend (its own CubDB), separate from any kv.
@@ -169,27 +175,23 @@ defmodule Epix.Session do
   def terminate(_reason, %{session_db: db}) when is_pid(db), do: CubDB.stop(db)
   def terminate(_reason, _state), do: :ok
 
-  # git is enabled only when repos are granted *and* the host has `git`. A grant
-  # on a host without `git` is almost certainly a misconfigured deployment, so warn
-  # (once, at start) and disable the capability rather than failing to start.
-  defp git_enabled?(opts) do
-    configured = GitApi.normalize(opts[:git]) != nil
+  # Both `git` and `fs` are backed by the `git` executable, so each is enabled only
+  # when it is configured *and* git is on PATH. A grant on a host without `git` is
+  # almost certainly a misconfigured deployment, so warn (once, at start) and
+  # disable the capability rather than failing to start.
+  defp capabilities(opts) do
+    git = GitApi.normalize(opts[:git]) != nil
+    fs = FsApi.normalize(opts[:fs]) != nil
+    available = Git.available?()
 
-    cond do
-      not configured ->
-        false
-
-      Git.available?() ->
-        true
-
-      true ->
-        Logger.warning(
-          "Epix.Session: `:git` repositories were configured but no `git` executable " <>
-            "was found on PATH; the git capability is disabled for this session."
-        )
-
-        false
+    if (git or fs) and not available do
+      Logger.warning(
+        "Epix.Session: git/fs capabilities were configured but no `git` executable " <>
+          "was found on PATH; they are disabled for this session."
+      )
     end
+
+    %{git: git and available, fs: fs and available}
   end
 
   defp open_session_db(nil, _id), do: nil
@@ -478,7 +480,8 @@ defmodule Epix.Session do
         store: opts[:store],
         namespaces: opts[:namespaces] || [],
         web: opts[:web],
-        git: opts[:git]
+        git: opts[:git],
+        fs: opts[:fs]
       )
 
     pid

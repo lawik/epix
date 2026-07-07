@@ -4,16 +4,16 @@ defmodule Epix.SystemPrompt do
 
   It documents two distinct surfaces:
 
-    * the Lua sandbox API (`time`, `kv` when storage is enabled, `web` when search
-      is enabled, and `git` when repositories are granted), callable *inside* your
-      Lua, and
+    * the Lua sandbox API (`time` and `bytes` always; `kv` when storage is enabled,
+      `web` when search is enabled, `git` when repositories are granted, and `fs`
+      when a virtual filesystem is enabled), callable *inside* your Lua, and
     * the function-calling tools you invoke to eval, define, and run Lua.
 
-  The `kv`, `web`, and `git` sections are included only when those capabilities
-  are enabled for the session.
+  The `kv`, `web`, `git`, and `fs` sections are included only when those
+  capabilities are enabled for the session.
   """
 
-  alias Epix.Lua.{GitApi, KvApi, TimeApi, WebApi}
+  alias Epix.Lua.{BytesApi, FsApi, GitApi, KvApi, TimeApi, WebApi}
 
   @spec build(keyword()) :: String.t()
   def build(opts \\ []) do
@@ -30,9 +30,11 @@ defmodule Epix.SystemPrompt do
     The host also exposes:
 
     #{TimeApi.docs()}
+    #{BytesApi.docs()}
     #{storage_section(opts[:storage])}
     #{web_section(opts[:web])}
     #{git_section(opts[:git])}
+    #{fs_section(opts[:fs])}
     ## Your tools
 
     - `lua_eval(code)` — run a one-shot Lua snippet. Use `return X` to get a value
@@ -95,4 +97,20 @@ defmodule Epix.SystemPrompt do
   end
 
   defp git_section(_disabled), do: ""
+
+  defp fs_section(true) do
+    """
+
+    You also have a virtual filesystem through an `fs` table, organized into named
+    namespaces (the same ones as `kv`; call `list_namespaces()` or
+    `fs.namespaces()`). Read and write files freely — parent directories are
+    implicit, and everything you change during a single run is saved together when
+    the run finishes. Prefer `fs` over `kv` for anything file-shaped (source,
+    documents, structured artifacts); `kv` is for small keyed values.
+
+    #{FsApi.docs()}
+    """
+  end
+
+  defp fs_section(_disabled), do: ""
 end

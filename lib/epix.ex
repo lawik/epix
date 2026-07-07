@@ -8,8 +8,8 @@ defmodule Epix do
     * `Epix.Runner` - drives the loop, performing injected effects
     * `Epix.Session` - GenServer shell owning the sandbox and conversation
     * `Epix.Lua.Sandbox` / `Epix.Lua.Runtime` and the API tables
-      (`Epix.Lua.TimeApi` / `Epix.Lua.KvApi` / `Epix.Lua.WebApi` /
-      `Epix.Lua.GitApi`) - the Lua layer
+      (`Epix.Lua.TimeApi` / `Epix.Lua.BytesApi` / `Epix.Lua.KvApi` /
+      `Epix.Lua.WebApi` / `Epix.Lua.GitApi` / `Epix.Lua.FsApi`) - the Lua layer
     * `Epix.Tools` - the model-facing tools (eval/define/run/list)
     * `Epix.SystemPrompt` - the base context
 

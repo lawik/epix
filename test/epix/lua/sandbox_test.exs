@@ -29,6 +29,15 @@ defmodule Epix.Lua.SandboxTest do
       assert {:ok, "[1, 2, 3]"} = Sandbox.eval(s, "return 1, 2, 3")
     end
 
+    test "returns a table as JSON rather than a placeholder", %{sandbox: s} do
+      assert {:ok, json} = Sandbox.eval(s, ~S|return {name = "Ada", nums = {1, 2, 3}}|)
+      assert Jason.decode!(json) == %{"name" => "Ada", "nums" => [1, 2, 3]}
+
+      # A single returned table is JSON (compact), distinct from multiple return
+      # values (`return 1, 2, 3` → "[1, 2, 3]").
+      assert {:ok, "[1,2,3]"} = Sandbox.eval(s, ~S|return {1, 2, 3}|)
+    end
+
     test "blocks dangerous libraries", %{sandbox: s} do
       assert {:error, _} = Sandbox.eval(s, "return os.getenv('HOME')")
     end
@@ -45,8 +54,9 @@ defmodule Epix.Lua.SandboxTest do
     end
 
     test "unencodable values are not leaked via inspect", %{sandbox: s} do
-      # A function ref cannot be JSON-encoded; must not leak Erlang internals.
-      assert {:ok, "<unencodable lua value>"} = Sandbox.eval(s, "return print")
+      # A function ref cannot be JSON-encoded; the placeholder must not leak Erlang
+      # internals (it points at the bytes helpers for the common binary case).
+      assert {:ok, "<value is not text;" <> _} = Sandbox.eval(s, "return print")
     end
   end
 

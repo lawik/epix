@@ -4,12 +4,14 @@ defmodule Epix.SystemPromptTest do
 
   alias Epix.SystemPrompt
 
-  test "no capabilities: only time is documented" do
+  test "always-on utilities (time, bytes) are documented with no capabilities" do
     prompt = SystemPrompt.build()
     assert prompt =~ "time.now()"
+    assert prompt =~ "bytes.hexdump"
     refute prompt =~ "kv.get"
     refute prompt =~ "web.search"
     refute prompt =~ "git.commit"
+    refute prompt =~ "fs.write"
   end
 
   test "storage flag gates the kv section" do
@@ -27,5 +29,12 @@ defmodule Epix.SystemPromptTest do
     assert prompt =~ "git.repos()"
     assert prompt =~ "git.commit"
     refute SystemPrompt.build(git: false) =~ "git.commit"
+  end
+
+  test "fs flag gates the fs section" do
+    prompt = SystemPrompt.build(fs: true)
+    assert prompt =~ "fs.write"
+    assert prompt =~ "fs.namespaces()"
+    refute SystemPrompt.build(fs: false) =~ "fs.write"
   end
 end
