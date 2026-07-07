@@ -9,14 +9,20 @@ defmodule Epix.Lua.Runtime do
   Results and errors are returned as strings ready to hand back to the model.
   """
 
-  alias Epix.Lua.{KvApi, TimeApi, WebApi}
+  alias Epix.Lua.{GitApi, KvApi, TimeApi, WebApi}
 
   @type result :: {:ok, String.t()} | {:error, String.t()}
   # nil = nothing beyond `time`; otherwise the optionally-present `kv` (store +
-  # granted namespaces) and `web` (Kagi options) capabilities for this run.
+  # granted namespaces), `web` (Kagi options), and `git` (granted repos)
+  # capabilities for this run.
   @type ctx ::
           nil
-          | %{store: Epix.Store.t() | nil, namespaces: [String.t()], web: keyword() | nil}
+          | %{
+              store: Epix.Store.t() | nil,
+              namespaces: [String.t()],
+              web: keyword() | nil,
+              git: %{String.t() => GitApi.repo()} | nil
+            }
 
   @doc "Evaluates a one-shot Lua snippet. Use `return X` to produce a result."
   @spec eval(String.t(), ctx()) :: result()
@@ -61,6 +67,7 @@ defmodule Epix.Lua.Runtime do
     |> TimeApi.install()
     |> maybe_install_kv(ctx)
     |> maybe_install_web(ctx)
+    |> maybe_install_git(ctx)
   end
 
   defp maybe_install_kv(lua, %{store: store, namespaces: namespaces}) when not is_nil(store),
@@ -70,6 +77,14 @@ defmodule Epix.Lua.Runtime do
 
   defp maybe_install_web(lua, %{web: opts}) when is_list(opts), do: WebApi.install(lua, opts)
   defp maybe_install_web(lua, _ctx), do: lua
+
+  # Installed only when repos are granted *and* the host has `git`; otherwise the
+  # capability silently degrades (the system prompt omits it to match).
+  defp maybe_install_git(lua, %{git: repos}) when is_map(repos) and map_size(repos) > 0 do
+    if Epix.Git.available?(), do: GitApi.install(lua, %{repos: repos}), else: lua
+  end
+
+  defp maybe_install_git(lua, _ctx), do: lua
 
   defp wrap(params, code) do
     "local function __tool(#{Enum.join(params, ", ")})\n#{code}\nend\n"

@@ -10,7 +10,7 @@ defmodule Epix.Lua.Sandbox do
 
   use GenServer
 
-  alias Epix.Lua.Runtime
+  alias Epix.Lua.{GitApi, Runtime}
 
   @type tool :: %{description: String.t(), params: [String.t()], code: String.t()}
 
@@ -55,7 +55,10 @@ defmodule Epix.Lua.Sandbox do
   @impl true
   def init(opts) do
     web = if is_list(opts[:web]), do: opts[:web], else: nil
-    {:ok, %{tools: %{}, store: opts[:store], namespaces: opts[:namespaces] || [], web: web}}
+    git = GitApi.normalize(opts[:git])
+
+    {:ok,
+     %{tools: %{}, store: opts[:store], namespaces: opts[:namespaces] || [], web: web, git: git}}
   end
 
   @impl true
@@ -102,13 +105,13 @@ defmodule Epix.Lua.Sandbox do
 
   def handle_call(:namespaces, _from, state), do: {:reply, state.namespaces, state}
 
-  # `kv` is installed only when a store is configured and `web` only when web is
-  # enabled; the granted namespaces are snapshotted into each eval. With neither,
-  # the run gets just `time`.
-  defp lua_ctx(%{store: nil, web: nil}), do: nil
+  # `kv` is installed only when a store is configured, `web` only when web is
+  # enabled, and `git` only when repos are granted; the granted namespaces are
+  # snapshotted into each eval. With none of them, the run gets just `time`.
+  defp lua_ctx(%{store: nil, web: nil, git: nil}), do: nil
 
-  defp lua_ctx(%{store: store, namespaces: namespaces, web: web}),
-    do: %{store: store, namespaces: namespaces, web: web}
+  defp lua_ctx(%{store: store, namespaces: namespaces, web: web, git: git}),
+    do: %{store: store, namespaces: namespaces, web: web, git: git}
 
   defp normalize_params(nil), do: []
   defp normalize_params(params) when is_list(params), do: Enum.map(params, &to_string/1)

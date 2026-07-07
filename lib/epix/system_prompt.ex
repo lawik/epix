@@ -4,15 +4,16 @@ defmodule Epix.SystemPrompt do
 
   It documents two distinct surfaces:
 
-    * the Lua sandbox API (`time`, `kv` when storage is enabled, and `web` when
-      search is enabled), callable *inside* your Lua, and
+    * the Lua sandbox API (`time`, `kv` when storage is enabled, `web` when search
+      is enabled, and `git` when repositories are granted), callable *inside* your
+      Lua, and
     * the function-calling tools you invoke to eval, define, and run Lua.
 
-  The `kv` and `web` sections are included only when those capabilities are
-  enabled for the session.
+  The `kv`, `web`, and `git` sections are included only when those capabilities
+  are enabled for the session.
   """
 
-  alias Epix.Lua.{KvApi, TimeApi, WebApi}
+  alias Epix.Lua.{GitApi, KvApi, TimeApi, WebApi}
 
   @spec build(keyword()) :: String.t()
   def build(opts \\ []) do
@@ -31,6 +32,7 @@ defmodule Epix.SystemPrompt do
     #{TimeApi.docs()}
     #{storage_section(opts[:storage])}
     #{web_section(opts[:web])}
+    #{git_section(opts[:git])}
     ## Your tools
 
     - `lua_eval(code)` — run a one-shot Lua snippet. Use `return X` to get a value
@@ -78,4 +80,19 @@ defmodule Epix.SystemPrompt do
   end
 
   defp web_section(_disabled), do: ""
+
+  defp git_section(true) do
+    """
+
+    You can also read and write host git repositories through a `git` table. Each
+    repository is bare (no working tree), so a human can keep an ordinary clone of
+    the same repo alongside you. You read across a whole repo but may only commit to
+    the branches you were granted; call `git.repos()` to see what you can access and
+    where you can write.
+
+    #{GitApi.docs()}
+    """
+  end
+
+  defp git_section(_disabled), do: ""
 end
