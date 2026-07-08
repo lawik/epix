@@ -3,7 +3,8 @@ defmodule Epix.Session do
   Stateful shell around the pure loop: the imperative boundary.
 
   Owns the Lua sandbox and the running conversation context, and assembles the
-  real effects (the req_llm model call and tool dispatch into the sandbox) that
+  real effects (the model call via the configured `Epix.Backend` and tool
+  dispatch into the sandbox) that
   `Epix.Runner` drives. A plain `GenServer`, exposing `context/1`, `sandbox/1`, and
   the storage-namespace controls. This is the seam where a `Solve` controller could
   project richer session state to a frontend.
@@ -18,9 +19,9 @@ defmodule Epix.Session do
   alias Epix.{
     Abort,
     Compaction,
+    Event,
     Git,
     Loop,
-    ModelStream,
     Runner,
     SessionStore,
     SystemPrompt,
@@ -29,9 +30,13 @@ defmodule Epix.Session do
 
   alias Epix.Loop.Config
   alias Epix.Lua.{FsApi, GitApi, Sandbox}
-  alias ReqLLM.{Context, Response}
+  alias Epix.Runner.Ctx
+  alias ReqLLM.Context
 
   require Logger
+
+  # The model backend used when a caller passes neither :backend nor :model_fun.
+  @default_backend Epix.Backend.ReqLLM
 
   @type t :: GenServer.server()
 
@@ -45,7 +50,12 @@ defmodule Epix.Session do
   directly, or splat `Epix.Model.from_env/0` to source them from `EPIX_*` env in
   a dev tool or test. (Tests inject `:model_fun` instead and need neither.)
 
-  Options: `:model`, `:api_key`, `:sandbox` (reuse one), `:store` (an `Epix.Store`
+  To run inference somewhere other than req_llm, pass `:backend` — an
+  `Epix.Backend` module (default `Epix.Backend.ReqLLM`). The backend interprets
+  `:model`, so a local backend may take an on-device model handle rather than a
+  `ReqLLM` model.
+
+  Options: `:model`, `:backend`, `:api_key`, `:sandbox` (reuse one), `:store` (an `Epix.Store`
   to enable the Lua `kv` API), `:namespaces` (the storage namespaces this agent
   may access, default `[]`), `:web` (enable the Lua `web` API — search and clean
   page fetch — by passing a keyword list of `Epix.Kagi` options, e.g.
@@ -161,8 +171,11 @@ defmodule Epix.Session do
       context: restore_or_new(session_db, sandbox, system),
       config: build_config(opts),
       verbose: opts[:verbose] || false,
+      # The model backend (an `Epix.Backend` module); default req_llm. A custom
+      # backend (e.g. an on-device model) is selected here.
+      backend: opts[:backend] || @default_backend,
       # Effect overrides (advanced/testing): a custom model_fun/tool_fun replaces
-      # the real req_llm/sandbox effects, making the orchestration testable offline.
+      # the backend/sandbox effects, making the orchestration testable offline.
       model_fun: opts[:model_fun],
       tool_fun: opts[:tool_fun],
       run: nil
@@ -264,11 +277,11 @@ defmodule Epix.Session do
     loop_state = Loop.init(Context.append(state.context, Context.user(prompt)), config)
     abort = Abort.new()
     {:ok, steer} = Agent.start_link(fn -> [] end)
-    run_opts = run_opts(state, config, opts, abort, steer)
     session = self()
 
-    model_fun = state.model_fun || model_fun(config)
+    model_fun = state.model_fun || backend_model_fun(state.backend)
     tool_fun = state.tool_fun || tool_fun(state.sandbox)
+    run_opts = run_opts(state, config, opts, abort, steer, model_fun)
 
     {pid, ref} =
       spawn_monitor(fn ->
@@ -358,12 +371,12 @@ defmodule Epix.Session do
 
   # The Session owns abort + steering so cancel/2 and steer/2 work; the caller's
   # other hook options pass through.
-  defp run_opts(state, config, opts, abort, steer) do
+  defp run_opts(state, config, opts, abort, steer, model_fun) do
     [
       verbose: state.verbose,
       abort: abort,
       steering: fn -> Agent.get_and_update(steer, &{&1, []}) end,
-      compaction: Keyword.get(opts, :compaction, compaction_fun(config))
+      compaction: Keyword.get(opts, :compaction, compaction_fun(model_fun, config, abort))
     ] ++
       Keyword.take(opts, [
         :emit,
@@ -387,22 +400,11 @@ defmodule Epix.Session do
 
   # --- effects (the imperative boundary) ---
 
-  defp model_fun(config) do
-    fn context, %Config{} = cfg, rctx ->
-      ModelStream.run(fn -> request(config, cfg, context) end, rctx)
-    end
-  end
-
-  defp request(config, cfg, context) do
-    ReqLLM.stream_text(config.model, context,
-      tools: cfg.tools,
-      api_key: cfg.api_key,
-      temperature: cfg.temperature,
-      max_tokens: cfg.max_tokens,
-      receive_timeout: cfg.receive_timeout
-    )
-  rescue
-    exception -> {:error, Exception.message(exception)}
+  # The model effect is the configured backend's `call/3`, wrapped as a plain
+  # function to match the Runner's model_fun contract. Tests override this
+  # wholesale with :model_fun.
+  defp backend_model_fun(backend) do
+    fn context, %Config{} = cfg, rctx -> backend.call(context, cfg, rctx) end
   end
 
   defp tool_fun(sandbox) do
@@ -417,12 +419,13 @@ defmodule Epix.Session do
   end
 
   # Compaction is the pure `Epix.Compaction` strategy with a model-backed
-  # summarizer injected (kept here because it is a real provider effect).
-  defp compaction_fun(config) do
-    Compaction.strategy(fn old -> summarize(old, config) end)
+  # summarizer injected. The summary runs through the same backend as the agent
+  # (via model_fun), so a non-req_llm backend summarizes with its own model too.
+  defp compaction_fun(model_fun, config, abort) do
+    Compaction.strategy(fn old -> summarize(model_fun, config, abort, old) end)
   end
 
-  defp summarize(messages, config) do
+  defp summarize(model_fun, config, abort, messages) do
     transcript =
       messages
       |> Enum.map_join("\n", fn m -> "#{m.role}: #{message_text(m)}" end)
@@ -432,12 +435,10 @@ defmodule Epix.Session do
       "Summarize this conversation transcript concisely, preserving key facts, " <>
         "decisions, tool results, and open tasks:\n\n" <> transcript
 
-    case ReqLLM.generate_text(config.model, Context.new([Context.user(prompt)]),
-           api_key: config.api_key,
-           max_tokens: 1024,
-           receive_timeout: config.receive_timeout
-         ) do
-      {:ok, resp} -> {:ok, Response.text(resp)}
+    ctx = %Ctx{emit: Event.noop(), abort: abort}
+
+    case model_fun.(Context.new([Context.user(prompt)]), %{config | tools: []}, ctx) do
+      {:ok, turn} -> {:ok, turn.text || ""}
       {:error, reason} -> {:error, reason}
     end
   end
