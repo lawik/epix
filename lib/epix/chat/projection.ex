@@ -59,6 +59,12 @@ defmodule Epix.Chat.Projection do
 
   def apply_event(state, {:tool_start, %{name: name}}), do: add_log(state, "⚙ #{name}…")
 
+  # The source is logged before the sandbox runs it, so a hanging or crashing
+  # Lua call still shows what was attempted. The result comes via :tool_result.
+  def apply_event(state, {:lua_call, %{tool: tool, code: code}}) do
+    add_log(state, "λ #{tool}: #{first_line(code)}")
+  end
+
   def apply_event(state, {:tool_result, %{name: name, body: body}}) do
     state
     |> add_message(%{role: :activity, text: "✓ #{name}: #{first_line(body)}"})

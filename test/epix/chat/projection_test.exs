@@ -57,6 +57,17 @@ defmodule Epix.Chat.ProjectionTest do
     assert state.log == ["⚙ lua_eval…", "✓ lua_eval: 42"]
   end
 
+  test "lua_call logs the code's first line; lua_result is ignored", %{state: state} do
+    state =
+      Projection.apply_event(state, {:lua_call, %{tool: "lua_eval", code: "return 2+2\nignored"}})
+
+    assert state.log == ["λ lua_eval: return 2+2"]
+    assert state.messages == []
+
+    event = {:lua_result, %{tool: "lua_eval", code: "return 2+2", result: "4", ok: true}}
+    assert Projection.apply_event(state, event) == state
+  end
+
   test "finish ok marks idle and logs done; finish error records an error", %{state: state} do
     done = Projection.finish(%{state | status: :thinking}, {:ok, "done"})
     assert done.status == :idle

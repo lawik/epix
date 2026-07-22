@@ -408,15 +408,49 @@ defmodule Epix.Session do
   end
 
   defp tool_fun(sandbox) do
-    fn call, _rctx ->
+    fn call, rctx ->
+      name = call.function.name
       args = decode_args(call.function.arguments)
+      code = lua_code(name, args, sandbox)
 
-      case Tools.dispatch(call.function.name, args, sandbox) do
-        {:ok, text} -> text
-        {:error, message} -> "ERROR: #{message}"
+      # Emit the Lua source about to be compiled/run *before* dispatch, so it is
+      # visible even if the code errors or hangs.
+      if code, do: rctx.emit.({:lua_call, %{tool: name, code: code}})
+
+      result = Tools.dispatch(name, args, sandbox)
+
+      body =
+        case result do
+          {:ok, text} -> text
+          {:error, message} -> "ERROR: #{message}"
+        end
+
+      # Emit the return value and whether it ran cleanly, so a failing Lua run is
+      # obvious rather than buried in the tool result text.
+      if code do
+        rctx.emit.(
+          {:lua_result, %{tool: name, code: code, result: body, ok: match?({:ok, _}, result)}}
+        )
       end
+
+      body
     end
   end
+
+  # The Lua source a Lua tool call will compile/run, or nil for a non-Lua tool.
+  # For run_tool the body is stored in the sandbox; for eval/define it is in the
+  # call arguments.
+  defp lua_code("lua_eval", %{"code" => code}, _sandbox) when is_binary(code), do: code
+  defp lua_code("lua_define_tool", %{"code" => code}, _sandbox) when is_binary(code), do: code
+
+  defp lua_code("lua_run_tool", %{"name" => name}, sandbox) when is_binary(name) do
+    case Sandbox.get_tool(sandbox, name) do
+      %{code: code} -> code
+      _ -> nil
+    end
+  end
+
+  defp lua_code(_name, _args, _sandbox), do: nil
 
   # Compaction is the pure `Epix.Compaction` strategy with a model-backed
   # summarizer injected. The summary runs through the same backend as the agent

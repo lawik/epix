@@ -21,6 +21,9 @@ defmodule Epix.Event do
              %{text: String.t() | nil, tool_calls: [%{name: String.t(), args: String.t()}]}}
           | {:tool_start, %{name: String.t()}}
           | {:tool_result, %{name: String.t(), body: String.t()}}
+          | {:lua_call, %{tool: String.t(), code: String.t()}}
+          | {:lua_result,
+             %{tool: String.t(), code: String.t(), result: String.t(), ok: boolean()}}
           | {:error, term()}
           | {:cancelled, %{step: non_neg_integer()}}
           | {:steering, %{count: pos_integer()}}

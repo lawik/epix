@@ -3,7 +3,7 @@ defmodule Epix.SessionTest do
 
   alias Epix.{Abort, Session}
   alias Epix.Loop.Turn
-  alias ReqLLM.Message
+  alias ReqLLM.{Message, ToolCall}
 
   defp done_turn,
     do: %Turn{
@@ -93,5 +93,42 @@ defmodule Epix.SessionTest do
   test "steer/2 reports :idle when no run is active" do
     session = start(model_fun: instant_model())
     assert {:error, :idle} = Session.steer(session, "hello")
+  end
+
+  test "Lua tool calls emit :lua_call and :lua_result around real dispatch" do
+    good = tool_call("c1", "lua_eval", ~s({"code":"return 2+2"}))
+    bad = tool_call("c2", "lua_eval", ~s({"code":"return ("}))
+
+    turns = [
+      %Turn{
+        message: %Message{role: :assistant, content: [], tool_calls: [good, bad]},
+        tool_calls: [good, bad],
+        finish_reason: :tool_calls
+      },
+      done_turn()
+    ]
+
+    {:ok, agent} = Agent.start_link(fn -> turns end)
+
+    scripted = fn _ctx, _cfg, _rctx ->
+      {:ok, Agent.get_and_update(agent, fn [t | rest] -> {t, rest} end)}
+    end
+
+    test_pid = self()
+    # No :tool_fun override, so the session's real sandbox dispatch runs.
+    session = start(model_fun: scripted)
+    emit = fn event -> send(test_pid, {:event, event}) end
+
+    assert {:ok, "done"} = Session.run(session, "hi", emit: emit)
+
+    assert_receive {:event, {:lua_call, %{tool: "lua_eval", code: "return 2+2"}}}
+    assert_receive {:event, {:lua_result, %{code: "return 2+2", result: "4", ok: true}}}
+
+    assert_receive {:event, {:lua_call, %{code: "return ("}}}
+    assert_receive {:event, {:lua_result, %{code: "return (", result: "ERROR: " <> _, ok: false}}}
+  end
+
+  defp tool_call(id, name, args_json) do
+    %ToolCall{id: id, type: "function", function: %{name: name, arguments: args_json}}
   end
 end

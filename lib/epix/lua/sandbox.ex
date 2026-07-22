@@ -37,6 +37,10 @@ defmodule Epix.Lua.Sandbox do
   @spec run_tool(GenServer.server(), String.t(), map()) :: Runtime.result()
   def run_tool(server, name, args), do: GenServer.call(server, {:run_tool, name, args})
 
+  @doc "Returns a defined tool's full record (`%{description, params, code}`) or nil."
+  @spec get_tool(GenServer.server(), String.t()) :: tool() | nil
+  def get_tool(server, name), do: GenServer.call(server, {:get_tool, name})
+
   @doc "Lists defined tools as `%{name, description, params}` maps."
   @spec list_tools(GenServer.server()) :: [map()]
   def list_tools(server), do: GenServer.call(server, :list_tools)
@@ -96,6 +100,10 @@ defmodule Epix.Lua.Sandbox do
          {:error, "no tool named #{inspect(name)}. Define it first or call lua_list_tools."},
          state}
     end
+  end
+
+  def handle_call({:get_tool, name}, _from, state) do
+    {:reply, Map.get(state.tools, name), state}
   end
 
   def handle_call(:list_tools, _from, state) do

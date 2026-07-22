@@ -69,6 +69,15 @@ defmodule Epix.Lua.SandboxTest do
       assert {:ok, "42"} = Sandbox.run_tool(s, "double", %{"x" => 21})
     end
 
+    test "get_tool returns the stored record, nil for unknown names", %{sandbox: s} do
+      assert :ok = Sandbox.define_tool(s, "double", "doubles x", ["x"], "return x + x")
+
+      assert %{description: "doubles x", params: ["x"], code: "return x + x"} =
+               Sandbox.get_tool(s, "double")
+
+      assert Sandbox.get_tool(s, "ghost") == nil
+    end
+
     test "rejects a tool that does not compile", %{sandbox: s} do
       assert {:error, _} = Sandbox.define_tool(s, "bad", "broken", [], "return (")
       assert [] = Sandbox.list_tools(s)
