@@ -3,14 +3,17 @@ defmodule Epix.Tui do
   Terminal frontend: a TermUI Elm app rendering the chat controller's state.
 
   The Solve controller stays the source of truth for the transcript; this
-  module holds only view-local state (input draft, terminal size). Solve
-  pushes `%Solve.Message{}` updates to the runtime process, which forwards
-  them here via `handle_info/2` - the TermUI runtime hands any message it
-  does not recognize to the root module.
+  module holds only view-local state (input draft and cursor, scroll offset,
+  terminal size). Solve pushes `%Solve.Message{}` updates to the runtime
+  process, which forwards them here via `handle_info/2` - the TermUI runtime
+  hands any message it does not recognize to the root module.
 
-  Start interactively with `Epix.Tui.run(session_opts: [model: ..., api_key: ...])`.
+  Start interactively with `Epix.Tui.run(session_opts: Epix.Model.from_env())`.
 
-  Keys: Enter submits, Esc cancels the in-flight run, Ctrl+C quits.
+  Keys: Enter submits (steers the run when one is active), Esc cancels the
+  in-flight run, Ctrl+C quits. Arrows/Home/End (or Ctrl+A/Ctrl+E) edit the
+  draft, PageUp/PageDown scroll the transcript (PageDown to the bottom resumes
+  following), Ctrl+O toggles full tool code/output.
   """
 
   use TermUI.Elm
@@ -46,7 +49,16 @@ defmodule Epix.Tui do
     chat = Solve.subscribe(app, :chat, self())
     {width, height} = initial_dimensions(opts)
 
-    %{app: app, chat: chat, input: "", width: width, height: height}
+    %{
+      app: app,
+      chat: chat,
+      input: "",
+      cursor: 0,
+      scroll: 0,
+      expanded: false,
+      width: width,
+      height: height
+    }
   end
 
   # The runtime passes :dimensions on newer term_ui; fall back to asking the
@@ -66,16 +78,11 @@ defmodule Epix.Tui do
   end
 
   @impl TermUI.Elm
-  def event_to_msg(%Event.Key{key: "c", modifiers: mods}, _state) do
-    if :ctrl in mods, do: {:msg, :quit}, else: {:msg, {:char, "c"}}
-  end
-
-  def event_to_msg(%Event.Key{key: :enter}, _state), do: {:msg, :submit}
-  def event_to_msg(%Event.Key{key: :escape}, _state), do: {:msg, :cancel}
-  def event_to_msg(%Event.Key{key: :backspace}, _state), do: {:msg, :backspace}
-
-  def event_to_msg(%Event.Key{key: key, modifiers: []}, _state) when is_binary(key) do
-    {:msg, {:char, key}}
+  def event_to_msg(%Event.Key{key: key, modifiers: mods}, _state) do
+    case key_msg(key, :ctrl in mods, mods) do
+      nil -> :ignore
+      msg -> {:msg, msg}
+    end
   end
 
   def event_to_msg(%Event.Paste{content: content}, _state), do: {:msg, {:paste, content}}
@@ -86,37 +93,84 @@ defmodule Epix.Tui do
 
   def event_to_msg(_event, _state), do: :ignore
 
+  defp key_msg("c", true, _mods), do: :quit
+  defp key_msg("a", true, _mods), do: :cursor_home
+  defp key_msg("e", true, _mods), do: :cursor_end
+  defp key_msg("o", true, _mods), do: :toggle_expand
+  defp key_msg(:enter, _ctrl, _mods), do: :submit
+  defp key_msg(:escape, _ctrl, _mods), do: :cancel
+  defp key_msg(:backspace, _ctrl, _mods), do: :backspace
+  defp key_msg(:delete, _ctrl, _mods), do: :delete
+  defp key_msg(:left, _ctrl, _mods), do: {:move, -1}
+  defp key_msg(:right, _ctrl, _mods), do: {:move, 1}
+  defp key_msg(:home, _ctrl, _mods), do: :cursor_home
+  defp key_msg(:end, _ctrl, _mods), do: :cursor_end
+  defp key_msg(:page_up, _ctrl, _mods), do: {:scroll, :up}
+  defp key_msg(:page_down, _ctrl, _mods), do: {:scroll, :down}
+  defp key_msg(key, false, []) when is_binary(key), do: {:char, key}
+  defp key_msg(_key, _ctrl, _mods), do: nil
+
   @impl TermUI.Elm
-  def update({:char, char}, state), do: {%{state | input: state.input <> char}, []}
+  def update({:char, char}, state), do: {insert(state, char), []}
 
   def update({:paste, content}, state) do
-    {%{state | input: state.input <> String.replace(content, "\n", " ")}, []}
+    {insert(state, String.replace(content, "\n", " ")), []}
   end
+
+  def update(:backspace, %{cursor: 0} = state), do: {state, []}
 
   def update(:backspace, state) do
-    {%{state | input: String.slice(state.input, 0..-2//1)}, []}
+    {before, aft} = split_input(state)
+    input = Enum.join(Enum.drop(before, -1)) <> Enum.join(aft)
+    {%{state | input: input, cursor: state.cursor - 1}, []}
   end
 
-  def update(:submit, %{chat: %{status: :idle}} = state) do
+  def update(:delete, state) do
+    {before, aft} = split_input(state)
+
+    case aft do
+      [] -> {state, []}
+      [_ | rest] -> {%{state | input: Enum.join(before) <> Enum.join(rest)}, []}
+    end
+  end
+
+  def update({:move, delta}, state) do
+    {%{state | cursor: clamp(state.cursor + delta, 0, String.length(state.input))}, []}
+  end
+
+  def update(:cursor_home, state), do: {%{state | cursor: 0}, []}
+  def update(:cursor_end, state), do: {%{state | cursor: String.length(state.input)}, []}
+
+  def update({:scroll, direction}, state) do
+    page = max(div(state.height, 2), 1)
+    delta = if direction == :up, do: page, else: -page
+    {%{state | scroll: clamp(state.scroll + delta, 0, max_scroll(state))}, []}
+  end
+
+  def update(:toggle_expand, state), do: {%{state | expanded: not state.expanded}, []}
+
+  def update(:submit, state) do
     case String.trim(state.input) do
       "" ->
         {state, []}
 
       text ->
-        Solve.dispatch(state.app, :chat, :submit, %{text: text})
-        {%{state | input: ""}, []}
+        # An idle session gets a new run; an active one is steered.
+        event = if state.chat.status == :idle, do: :submit, else: :steer
+        Solve.dispatch(state.app, :chat, event, %{text: text})
+        {%{state | input: "", cursor: 0, scroll: 0}, []}
     end
   end
-
-  # A run is active: keep the draft; steering lands here later.
-  def update(:submit, state), do: {state, []}
 
   def update(:cancel, state) do
     Solve.dispatch(state.app, :chat, :cancel, %{})
     {state, []}
   end
 
-  def update({:resize, width, height}, state), do: {%{state | width: width, height: height}, []}
+  def update({:resize, width, height}, state) do
+    state = %{state | width: width, height: height}
+    {%{state | scroll: clamp(state.scroll, 0, max_scroll(state))}, []}
+  end
 
   def update(:quit, state), do: {state, [:quit]}
 
@@ -137,85 +191,107 @@ defmodule Epix.Tui do
 
   @impl TermUI.Elm
   def view(%{width: width, height: height} = state) do
-    input = input_lines(state, width)
+    input = input_rows(state, width)
     transcript_height = max(height - 1 - length(input), 1)
 
-    lines =
-      state.chat.messages
-      |> Enum.flat_map(&message_lines(&1, width))
+    visible =
+      state
+      |> transcript_rows(width)
+      |> Enum.drop(-state.scroll)
       |> Enum.take(-transcript_height)
 
-    padding = List.duplicate(text(""), transcript_height - length(lines))
+    padding = List.duplicate({"", nil}, transcript_height - length(visible))
 
-    stack(
-      :vertical,
-      padding ++ lines ++ [status_line(state, width)] ++ input
-    )
+    rows =
+      padding ++
+        visible ++ [status_row(state, width)] ++ Enum.map(input, &{&1, nil})
+
+    stack(:vertical, Enum.map(rows, fn {content, style} -> text(content, style) end))
   end
 
   # --- transcript ---
 
-  defp message_lines(%{role: :user, text: body}, width) do
-    styled_lines("» " <> body, width, @user_style) ++ [text("")]
+  defp transcript_rows(state, width) do
+    Enum.flat_map(state.chat.messages, &message_rows(&1, width, state.expanded))
   end
 
-  defp message_lines(%{role: :assistant, text: body}, width) do
-    styled_lines(body, width, nil) ++ [text("")]
+  defp message_rows(%{role: :user, text: body}, width, _expanded) do
+    rows("» " <> body, width, @user_style) ++ [{"", nil}]
   end
 
-  defp message_lines(%{role: :error, text: body}, width) do
-    styled_lines(body, width, @fail_style) ++ [text("")]
+  defp message_rows(%{role: :assistant, text: body}, width, _expanded) do
+    rows(body, width, nil) ++ [{"", nil}]
   end
 
-  defp message_lines(%{role: :tool} = entry, width) do
-    header_lines(entry, width) ++
-      code_lines(entry.code, width) ++ result_lines(entry, width) ++ [text("")]
+  defp message_rows(%{role: :error, text: body}, width, _expanded) do
+    rows(body, width, @fail_style) ++ [{"", nil}]
   end
 
-  defp header_lines(%{done: false, name: name}, width) do
-    styled_lines("⚙ #{name}…", width, @tool_style)
+  defp message_rows(%{role: :tool} = entry, width, expanded) do
+    header_rows(entry, width) ++
+      code_rows(entry.code, width, expanded) ++
+      result_rows(entry, width, expanded) ++ [{"", nil}]
   end
 
-  defp header_lines(%{done: true, name: name, ok: ok}, width) do
+  defp header_rows(%{done: false, name: name}, width) do
+    rows("⚙ #{name}…", width, @tool_style)
+  end
+
+  defp header_rows(%{done: true, name: name, ok: ok}, width) do
     {mark, style} = if ok, do: {"✓", @ok_style}, else: {"✗", @fail_style}
-    styled_lines("#{mark} #{name}", width, style)
+    rows("#{mark} #{name}", width, style)
   end
 
-  defp code_lines(nil, _width), do: []
+  defp code_rows(nil, _width, _expanded), do: []
 
-  defp code_lines(code, width) do
-    capped(code, width - 4, @code_cap) |> Enum.map(&text("  │ " <> &1, @dim_style))
+  defp code_rows(code, width, expanded) do
+    code
+    |> capped(width - 4, if(expanded, do: :all, else: @code_cap))
+    |> Enum.map(&{"  │ " <> &1, @dim_style})
   end
 
   # A running Lua tool may already carry a result via lua_result; show results
   # only once the tool is done to avoid flicker between the two events.
-  defp result_lines(%{done: false}, _width), do: []
-  defp result_lines(%{result: nil}, _width), do: []
+  defp result_rows(%{done: false}, _width, _expanded), do: []
+  defp result_rows(%{result: nil}, _width, _expanded), do: []
 
-  defp result_lines(%{result: result}, width) do
-    capped(result, width - 2, @result_cap) |> Enum.map(&text("  " <> &1, @dim_style))
+  defp result_rows(%{result: result}, width, expanded) do
+    result
+    |> capped(width - 2, if(expanded, do: :all, else: @result_cap))
+    |> Enum.map(&{"  " <> &1, @dim_style})
   end
 
   # --- chrome ---
 
-  defp status_line(%{chat: chat}, width) do
+  defp status_row(%{chat: chat} = state, width) do
     left = " #{status_label(chat.status)}"
-    right = "#{chat.tokens}tok "
+
+    right =
+      [
+        if(state.expanded, do: "≡ full", else: nil),
+        if(state.scroll > 0, do: "↑#{state.scroll}", else: nil),
+        "#{chat.tokens}tok "
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" · ")
+
     gap = max(width - String.length(left) - String.length(right), 1)
-    text(left <> String.duplicate(" ", gap) <> right, @bar_style)
+    {left <> String.duplicate(" ", gap) <> right, @bar_style}
   end
 
   defp status_label(:idle), do: "ready"
   defp status_label(:thinking), do: "thinking…"
   defp status_label(:running_tools), do: "running tools…"
 
-  # The draft wraps like any other text (cursor included, so it flows with the
-  # words); long drafts show their tail, capped so the transcript keeps room.
-  defp input_lines(%{input: input}, width) do
-    ("» " <> input <> "▌")
+  # The draft wraps like any other text; the cursor block sits at the caret so
+  # editing position is visible. Long drafts show their tail, capped so the
+  # transcript keeps room.
+  defp input_rows(state, width) do
+    {before, aft} = split_input(state)
+
+    ("» " <> Enum.join(before) <> "▌" <> Enum.join(aft))
     |> wrap(max(width - 1, 1))
     |> Enum.take(-@input_cap)
-    |> Enum.map(&text/1)
   end
 
   # --- helpers ---
@@ -227,9 +303,29 @@ defmodule Epix.Tui do
     app
   end
 
-  defp styled_lines(body, width, style) do
-    body |> wrap(width) |> Enum.map(&text(&1, style))
+  defp insert(state, text) do
+    {before, aft} = split_input(state)
+    input = Enum.join(before) <> text <> Enum.join(aft)
+    %{state | input: input, cursor: state.cursor + String.length(text)}
   end
+
+  defp split_input(%{input: input, cursor: cursor}) do
+    input |> String.graphemes() |> Enum.split(cursor)
+  end
+
+  defp max_scroll(%{width: width, height: height} = state) do
+    input_height = length(input_rows(state, width))
+    transcript_height = max(height - 1 - input_height, 1)
+    max(length(transcript_rows(state, width)) - transcript_height, 0)
+  end
+
+  defp clamp(value, low, high), do: value |> max(low) |> min(high)
+
+  defp rows(body, width, style) do
+    body |> wrap(width) |> Enum.map(&{&1, style})
+  end
+
+  defp capped(body, width, :all), do: wrap(body, width)
 
   defp capped(body, width, cap) do
     lines = wrap(body, width)
@@ -258,20 +354,18 @@ defmodule Epix.Tui do
     line
     |> String.split(" ")
     |> Enum.flat_map(&break_word(&1, width))
-    |> Enum.reduce([], fn word, rows ->
-      case rows do
-        [] ->
-          [word]
-
-        [row | rest] ->
-          if String.length(row) + 1 + String.length(word) <= width do
-            [row <> " " <> word | rest]
-          else
-            [word, row | rest]
-          end
-      end
-    end)
+    |> Enum.reduce([], &add_word(&2, &1, width))
     |> Enum.reverse()
+  end
+
+  defp add_word([], word, _width), do: [word]
+
+  defp add_word([row | rest], word, width) do
+    if String.length(row) + 1 + String.length(word) <= width do
+      [row <> " " <> word | rest]
+    else
+      [word, row | rest]
+    end
   end
 
   defp break_word(word, width) do

@@ -8,7 +8,7 @@ defmodule Epix.Chat.Controller do
   emitted events into exposed state via the pure `Epix.Chat.Projection`.
   """
 
-  use Solve.Controller, events: [:submit, :cancel]
+  use Solve.Controller, events: [:submit, :cancel, :steer]
 
   alias Epix.Chat.Projection
   alias Epix.Session
@@ -36,6 +36,18 @@ defmodule Epix.Chat.Controller do
     end)
 
     Projection.user_prompt(state, text)
+  end
+
+  @doc """
+  Handles a `:steer` event: injects the text into the in-flight run, or starts
+  a new run when the race was lost and the session already went idle.
+  """
+  @spec steer(%{text: String.t()}, map()) :: map()
+  def steer(%{text: text} = payload, %{session: session} = state) do
+    case Session.steer(session, text) do
+      :ok -> Projection.steer_prompt(state, text)
+      {:error, :idle} -> submit(payload, state)
+    end
   end
 
   @doc "Handles a `:cancel` event by aborting the in-flight run, if any."

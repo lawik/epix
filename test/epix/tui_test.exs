@@ -1,11 +1,12 @@
 defmodule Epix.TuiTest do
   @moduledoc """
   The TUI is exercised headless: event_to_msg/update/view are pure, and the
-  end-to-end test runs a real Chat.App with a fake model, playing the role of
+  end-to-end tests run a real Chat.App with a fake model, playing the role of
   the TermUI runtime process (init subscribes self(), Solve pushes here).
   """
   use ExUnit.Case, async: true
 
+  alias Epix.Abort
   alias Epix.Chat.App
   alias Epix.Loop.Turn
   alias Epix.Tui
@@ -23,6 +24,23 @@ defmodule Epix.TuiTest do
     end
   end
 
+  # Signals the test when the model is reached, then blocks until cancelled.
+  defp blocking_model(test_pid) do
+    fn _ctx, _cfg, rctx ->
+      send(test_pid, :model_running)
+      wait_cancel(rctx.abort)
+    end
+  end
+
+  defp wait_cancel(abort) do
+    if Abort.cancelled?(abort) do
+      {:error, :cancelled}
+    else
+      Process.sleep(5)
+      wait_cancel(abort)
+    end
+  end
+
   defp start_state(model_fun) do
     {:ok, app} =
       App.start_link(name: nil, params: %{session_opts: [model_fun: model_fun, api_key: "test"]})
@@ -35,12 +53,50 @@ defmodule Epix.TuiTest do
 
   defp rendered(state), do: state |> Tui.view() |> texts() |> Enum.join("\n")
 
+  defp type(state, string) do
+    Enum.reduce(String.graphemes(string), state, fn char, state ->
+      {state, []} = Tui.update({:char, char}, state)
+      state
+    end)
+  end
+
+  # Folds pushed Solve updates (as the runtime would) until the predicate holds.
+  defp await_until(state, fun, deadline \\ 2_000) do
+    if fun.(state) do
+      state
+    else
+      receive do
+        %Solve.Message{} = message ->
+          await_until(Tui.handle_info(message, state), fun, deadline)
+      after
+        deadline -> flunk("no Solve update satisfied the predicate")
+      end
+    end
+  end
+
   describe "event_to_msg/2" do
-    test "maps keys to editing, submit, cancel and quit messages" do
+    test "maps keys to editing, navigation, submit, cancel and quit messages" do
       assert Tui.event_to_msg(%Event.Key{key: "a", modifiers: []}, %{}) == {:msg, {:char, "a"}}
       assert Tui.event_to_msg(%Event.Key{key: :enter}, %{}) == {:msg, :submit}
       assert Tui.event_to_msg(%Event.Key{key: :escape}, %{}) == {:msg, :cancel}
       assert Tui.event_to_msg(%Event.Key{key: :backspace}, %{}) == {:msg, :backspace}
+      assert Tui.event_to_msg(%Event.Key{key: :delete}, %{}) == {:msg, :delete}
+      assert Tui.event_to_msg(%Event.Key{key: :left}, %{}) == {:msg, {:move, -1}}
+      assert Tui.event_to_msg(%Event.Key{key: :right}, %{}) == {:msg, {:move, 1}}
+      assert Tui.event_to_msg(%Event.Key{key: :home}, %{}) == {:msg, :cursor_home}
+      assert Tui.event_to_msg(%Event.Key{key: :end}, %{}) == {:msg, :cursor_end}
+      assert Tui.event_to_msg(%Event.Key{key: :page_up}, %{}) == {:msg, {:scroll, :up}}
+      assert Tui.event_to_msg(%Event.Key{key: :page_down}, %{}) == {:msg, {:scroll, :down}}
+
+      assert Tui.event_to_msg(%Event.Key{key: "a", modifiers: [:ctrl]}, %{}) ==
+               {:msg, :cursor_home}
+
+      assert Tui.event_to_msg(%Event.Key{key: "e", modifiers: [:ctrl]}, %{}) ==
+               {:msg, :cursor_end}
+
+      assert Tui.event_to_msg(%Event.Key{key: "o", modifiers: [:ctrl]}, %{}) ==
+               {:msg, :toggle_expand}
+
       assert Tui.event_to_msg(%Event.Key{key: "c", modifiers: [:ctrl]}, %{}) == {:msg, :quit}
       assert Tui.event_to_msg(%Event.Key{key: "c", modifiers: []}, %{}) == {:msg, {:char, "c"}}
       assert Tui.event_to_msg(%Event.Paste{content: "x"}, %{}) == {:msg, {:paste, "x"}}
@@ -57,16 +113,43 @@ defmodule Epix.TuiTest do
       %{state: start_state(reply_model("unused"))}
     end
 
-    test "chars, paste and backspace edit the draft", %{state: state} do
-      {state, []} = Tui.update({:char, "h"}, state)
-      {state, []} = Tui.update({:char, "i"}, state)
-      assert state.input == "hi"
+    test "cursor editing: move, insert, delete, home and end", %{state: state} do
+      state = type(state, "hlo")
+      assert %{input: "hlo", cursor: 3} = state
 
-      {state, []} = Tui.update({:paste, "there\nfriend"}, state)
-      assert state.input == "hithere friend"
+      {state, []} = Tui.update({:move, -2}, state)
+      state = type(state, "e")
+      assert %{input: "helo", cursor: 2} = state
 
+      {state, []} = Tui.update(:delete, state)
+      assert state.input == "heo"
+
+      {state, []} = Tui.update(:cursor_home, state)
+      {same, []} = Tui.update(:backspace, state)
+      assert same.input == "heo"
+
+      {state, []} = Tui.update(:cursor_end, state)
       {state, []} = Tui.update(:backspace, state)
-      assert state.input == "hithere frien"
+      assert %{input: "he", cursor: 2} = state
+
+      # Moves clamp at both ends.
+      {state, []} = Tui.update({:move, 99}, state)
+      assert state.cursor == 2
+      {state, []} = Tui.update({:move, -99}, state)
+      assert state.cursor == 0
+    end
+
+    test "paste inserts at the cursor with newlines flattened", %{state: state} do
+      state = type(state, "ad")
+      {state, []} = Tui.update({:move, -1}, state)
+      {state, []} = Tui.update({:paste, "b\nc"}, state)
+      assert %{input: "ab cd", cursor: 4} = state
+    end
+
+    test "the cursor block renders at the caret position", %{state: state} do
+      state = type(state, "abc")
+      {state, []} = Tui.update({:move, -2}, state)
+      assert rendered(state) =~ "» a▌bc"
     end
 
     test "resize stores the new dimensions", %{state: state} do
@@ -79,14 +162,9 @@ defmodule Epix.TuiTest do
     end
 
     test "blank submits are ignored; quit returns the quit command", %{state: state} do
-      {state, []} = Tui.update({:char, " "}, state)
+      state = type(state, " ")
       assert {^state, []} = Tui.update(:submit, state)
       assert {_state, [:quit]} = Tui.update(:quit, state)
-    end
-
-    test "submit while a run is active keeps the draft", %{state: state} do
-      state = %{state | chat: %{state.chat | status: :thinking}, input: "queued thought"}
-      assert {%{input: "queued thought"}, []} = Tui.update(:submit, state)
     end
   end
 
@@ -107,7 +185,7 @@ defmodule Epix.TuiTest do
           tokens: 42
       }
 
-      out = rendered(%{state | chat: chat, input: "draft"})
+      out = rendered(type(%{state | chat: chat}, "draft"))
 
       assert out =~ "» hello"
       assert out =~ "hi back"
@@ -166,7 +244,7 @@ defmodule Epix.TuiTest do
 
     test "a long draft wraps into multiple input rows and keeps the cursor", %{state: state} do
       {state, []} = Tui.update({:resize, 20, 24}, state)
-      state = %{state | input: String.duplicate("word ", 10)}
+      state = type(state, String.duplicate("word ", 10))
 
       lines = state |> Tui.view() |> texts()
       assert length(lines) == 24
@@ -199,14 +277,57 @@ defmodule Epix.TuiTest do
       assert %{width: 123, height: 45} = state
     end
 
-    test "long tool code is capped with an ellipsis", %{state: state} do
+    test "long tool code is capped and Ctrl+O expands it", %{state: state} do
       code = Enum.map_join(1..20, "\n", &"line #{&1}")
       entry = %{role: :tool, name: "t", code: code, result: nil, ok: nil, done: false}
+      state = %{state | chat: %{state.chat | messages: [entry]}, height: 60}
 
-      out = rendered(%{state | chat: %{state.chat | messages: [entry]}, height: 60})
+      out = rendered(state)
       assert out =~ "line 6"
       refute out =~ "line 7"
       assert out =~ "…"
+
+      {state, []} = Tui.update(:toggle_expand, state)
+      out = rendered(state)
+      assert out =~ "line 7"
+      assert out =~ "line 20"
+      assert rendered(state) =~ "≡ full"
+    end
+
+    test "page up scrolls back through the transcript; page down returns to live", %{
+      state: state
+    } do
+      {state, []} = Tui.update({:resize, 40, 10}, state)
+      messages = for n <- 1..20, do: %{role: :user, text: "message number #{n}"}
+      state = %{state | chat: %{state.chat | messages: messages}}
+
+      live = rendered(state)
+      assert live =~ "message number 20"
+      refute live =~ "message number 1\n"
+
+      {state, []} = Tui.update({:scroll, :up}, state)
+      scrolled = rendered(state)
+      refute scrolled =~ "message number 20"
+      assert scrolled =~ "↑"
+
+      # Scrolling is clamped at the top: the first message becomes visible.
+      state =
+        Enum.reduce(1..50, state, fn _, state ->
+          {state, []} = Tui.update({:scroll, :up}, state)
+          state
+        end)
+
+      assert rendered(state) =~ "message number 1"
+
+      # Page down all the way re-follows the tail.
+      state =
+        Enum.reduce(1..60, state, fn _, state ->
+          {state, []} = Tui.update({:scroll, :down}, state)
+          state
+        end)
+
+      assert state.scroll == 0
+      assert rendered(state) =~ "message number 20"
     end
   end
 
@@ -215,36 +336,45 @@ defmodule Epix.TuiTest do
       state = start_state(reply_model("hello back"))
       assert state.chat.status == :idle
 
-      {state, []} =
-        Enum.reduce(String.graphemes("hi там"), {state, []}, fn char, {state, _} ->
-          Tui.update({:char, char}, state)
+      state = type(state, "hi там")
+      {state, []} = Tui.update(:submit, state)
+      assert %{input: "", cursor: 0} = state
+
+      state =
+        await_until(state, fn state ->
+          state.chat.status == :idle and
+            Enum.any?(state.chat.messages, &(&1.role == :assistant and &1.text == "hello back"))
         end)
 
-      {state, []} = Tui.update(:submit, state)
-      assert state.input == ""
-
-      state = await_idle_reply(state, "hello back")
       out = rendered(state)
       assert out =~ "» hi там"
       assert out =~ "hello back"
       assert out =~ "ready"
     end
 
-    # Fold pushed Solve updates (as the runtime would) until the reply landed.
-    defp await_idle_reply(state, text, deadline \\ 2_000) do
-      receive do
-        %Solve.Message{} = message ->
-          state = Tui.handle_info(message, state)
+    test "submitting during a run steers it", %{} do
+      state = start_state(blocking_model(self()))
 
-          if state.chat.status == :idle and
-               Enum.any?(state.chat.messages, &(&1.role == :assistant and &1.text == text)) do
-            state
-          else
-            await_idle_reply(state, text, deadline)
-          end
-      after
-        deadline -> flunk("no idle update with the assistant reply arrived")
-      end
+      state = type(state, "go")
+      {state, []} = Tui.update(:submit, state)
+      assert_receive :model_running, 1000
+
+      state = await_until(state, &(&1.chat.status != :idle))
+
+      state = type(state, "also consider this")
+      {state, []} = Tui.update(:submit, state)
+      assert state.input == ""
+
+      state =
+        await_until(state, fn state ->
+          Enum.any?(state.chat.messages, &(&1.role == :user and &1.text == "also consider this"))
+        end)
+
+      assert Enum.any?(state.chat.log, &(&1 =~ "↷ steer: also consider this"))
+
+      # Clean up: cancel the blocked run and wait for idle.
+      {state, []} = Tui.update(:cancel, state)
+      await_until(state, &(&1.chat.status == :idle))
     end
   end
 end

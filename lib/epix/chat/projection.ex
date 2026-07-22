@@ -54,6 +54,14 @@ defmodule Epix.Chat.Projection do
     |> add_log("» you: #{first_line(text)}")
   end
 
+  @doc "Records a steering message injected into the in-flight run."
+  @spec steer_prompt(state(), String.t()) :: state()
+  def steer_prompt(state, text) do
+    state
+    |> add_message(%{role: :user, text: text})
+    |> add_log("↷ steer: #{first_line(text)}")
+  end
+
   @doc "Folds a loop event into the view state."
   @spec apply_event(state(), Epix.Event.t()) :: state()
   def apply_event(state, {:status, status}), do: put_status(state, status)

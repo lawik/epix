@@ -16,6 +16,12 @@ defmodule Epix.Chat.ProjectionTest do
     assert state.log == ["» you: hello"]
   end
 
+  test "steer_prompt appends the message and logs it as a steer", %{state: state} do
+    state = Projection.steer_prompt(state, "actually use flags")
+    assert state.messages == [%{role: :user, text: "actually use flags"}]
+    assert state.log == ["↷ steer: actually use flags"]
+  end
+
   test "a status event updates status without logging", %{state: state} do
     state = Projection.apply_event(state, {:status, :running_tools})
     assert state.status == :running_tools
