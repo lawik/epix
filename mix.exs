@@ -82,6 +82,7 @@ defmodule Epix.MixProject do
       {:lua, "~> 0.4"},
       {:cubdb, "~> 2.0"},
       {:solve, "~> 0.2"},
+      {:term_ui, github: "lawik/term_ui", branch: "full-repaint"},
       {:nstandard, "~> 0.5", runtime: false},
       {:req_llm, "~> 1.0"},
       {:req, "~> 0.6"},
