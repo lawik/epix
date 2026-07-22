@@ -3,23 +3,33 @@ defmodule Epix.Tui do
   Terminal frontend: a TermUI Elm app rendering the chat controller's state.
 
   The Solve controller stays the source of truth for the transcript; this
-  module holds only view-local state (input draft and cursor, scroll offset,
-  terminal size). Solve pushes `%Solve.Message{}` updates to the runtime
-  process, which forwards them here via `handle_info/2` - the TermUI runtime
-  hands any message it does not recognize to the root module.
+  module holds only view-local state (input draft and cursor, history, scroll
+  offset, terminal size). Solve pushes `%Solve.Message{}` updates to the
+  runtime process, which forwards them here via `handle_info/2` - the TermUI
+  runtime hands any message it does not recognize to the root module.
+
+  Assistant messages render as markdown (headings, emphasis, code fences with
+  makeup highlighting where a lexer exists, links as underlined text with the
+  URL kept visible for terminal auto-detection). All wrapping measures display
+  columns via `TermUI.Renderer.DisplayWidth`, over-estimating ambiguous
+  clusters: wide text may wrap a little early, but rows never exceed the
+  terminal width, so nothing is clipped.
 
   Start interactively with `Epix.Tui.run(session_opts: Epix.Model.from_env())`.
 
   Keys: Enter submits (steers the run when one is active), Esc cancels the
   in-flight run, Ctrl+C quits. Arrows/Home/End (or Ctrl+A/Ctrl+E) edit the
-  draft, PageUp/PageDown scroll the transcript (PageDown to the bottom resumes
-  following), Ctrl+O toggles full tool code/output.
+  draft, Up/Down recall input history, PageUp/PageDown scroll the transcript
+  (PageDown to the bottom resumes following), Ctrl+O toggles full tool
+  code/output.
   """
 
   use TermUI.Elm
 
   alias Epix.Chat.App
   alias TermUI.Event
+  alias TermUI.Markdown
+  alias TermUI.Renderer.DisplayWidth
   alias TermUI.Renderer.Style
 
   @user_style Style.new(fg: :cyan, attrs: [:bold])
@@ -32,6 +42,7 @@ defmodule Epix.Tui do
   @code_cap 6
   @result_cap 3
   @input_cap 5
+  @history_cap 100
 
   @doc """
   Runs the TUI, blocking until quit. Starts its own `Epix.Chat.App` with
@@ -54,6 +65,9 @@ defmodule Epix.Tui do
       chat: chat,
       input: "",
       cursor: 0,
+      history: [],
+      hist_idx: nil,
+      stash: "",
       scroll: 0,
       expanded: false,
       width: width,
@@ -103,6 +117,8 @@ defmodule Epix.Tui do
   defp key_msg(:delete, _ctrl, _mods), do: :delete
   defp key_msg(:left, _ctrl, _mods), do: {:move, -1}
   defp key_msg(:right, _ctrl, _mods), do: {:move, 1}
+  defp key_msg(:up, _ctrl, _mods), do: {:history, :prev}
+  defp key_msg(:down, _ctrl, _mods), do: {:history, :next}
   defp key_msg(:home, _ctrl, _mods), do: :cursor_home
   defp key_msg(:end, _ctrl, _mods), do: :cursor_end
   defp key_msg(:page_up, _ctrl, _mods), do: {:scroll, :up}
@@ -122,7 +138,7 @@ defmodule Epix.Tui do
   def update(:backspace, state) do
     {before, aft} = split_input(state)
     input = Enum.join(Enum.drop(before, -1)) <> Enum.join(aft)
-    {%{state | input: input, cursor: state.cursor - 1}, []}
+    {%{state | input: input, cursor: state.cursor - 1, hist_idx: nil}, []}
   end
 
   def update(:delete, state) do
@@ -130,7 +146,7 @@ defmodule Epix.Tui do
 
     case aft do
       [] -> {state, []}
-      [_ | rest] -> {%{state | input: Enum.join(before) <> Enum.join(rest)}, []}
+      [_ | rest] -> {%{state | input: Enum.join(before) <> Enum.join(rest), hist_idx: nil}, []}
     end
   end
 
@@ -140,6 +156,26 @@ defmodule Epix.Tui do
 
   def update(:cursor_home, state), do: {%{state | cursor: 0}, []}
   def update(:cursor_end, state), do: {%{state | cursor: String.length(state.input)}, []}
+
+  def update({:history, :prev}, %{history: []} = state), do: {state, []}
+
+  def update({:history, :prev}, %{hist_idx: nil} = state) do
+    {recall(%{state | stash: state.input}, 0), []}
+  end
+
+  def update({:history, :prev}, %{hist_idx: idx} = state) do
+    if idx < length(state.history) - 1, do: {recall(state, idx + 1), []}, else: {state, []}
+  end
+
+  def update({:history, :next}, %{hist_idx: nil} = state), do: {state, []}
+
+  def update({:history, :next}, %{hist_idx: 0} = state) do
+    stash = state.stash
+
+    {%{state | hist_idx: nil, stash: "", input: stash, cursor: String.length(stash)}, []}
+  end
+
+  def update({:history, :next}, %{hist_idx: idx} = state), do: {recall(state, idx - 1), []}
 
   def update({:scroll, direction}, state) do
     page = max(div(state.height, 2), 1)
@@ -158,7 +194,20 @@ defmodule Epix.Tui do
         # An idle session gets a new run; an active one is steered.
         event = if state.chat.status == :idle, do: :submit, else: :steer
         Solve.dispatch(state.app, :chat, event, %{text: text})
-        {%{state | input: "", cursor: 0, scroll: 0}, []}
+
+        history = [text | Enum.reject(state.history, &(&1 == text))]
+
+        state = %{
+          state
+          | input: "",
+            cursor: 0,
+            scroll: 0,
+            history: Enum.take(history, @history_cap),
+            hist_idx: nil,
+            stash: ""
+        }
+
+        {state, []}
     end
   end
 
@@ -175,6 +224,11 @@ defmodule Epix.Tui do
   def update(:quit, state), do: {state, [:quit]}
 
   def update(_msg, state), do: {state, []}
+
+  defp recall(state, idx) do
+    text = Enum.at(state.history, idx)
+    %{state | hist_idx: idx, input: text, cursor: String.length(text)}
+  end
 
   @doc false
   # Solve pushes exposed-state updates to the runtime process; the runtime
@@ -200,37 +254,45 @@ defmodule Epix.Tui do
       |> Enum.drop(-state.scroll)
       |> Enum.take(-transcript_height)
 
-    padding = List.duplicate({"", nil}, transcript_height - length(visible))
+    padding = List.duplicate([{"", nil}], transcript_height - length(visible))
 
     rows =
       padding ++
-        visible ++ [status_row(state, width)] ++ Enum.map(input, &{&1, nil})
+        visible ++ [status_row(state, width)] ++ Enum.map(input, &[{&1, nil}])
 
-    stack(:vertical, Enum.map(rows, fn {content, style} -> text(content, style) end))
+    stack(:vertical, Enum.map(rows, &Markdown.render_line_to_node/1))
   end
 
-  # --- transcript ---
+  # --- transcript (each row is a styled line: a list of {text, style} spans) ---
 
   defp transcript_rows(state, width) do
     Enum.flat_map(state.chat.messages, &message_rows(&1, width, state.expanded))
   end
 
   defp message_rows(%{role: :user, text: body}, width, _expanded) do
-    rows("» " <> body, width, @user_style) ++ [{"", nil}]
+    rows("» " <> body, width, @user_style) ++ [[{"", nil}]]
   end
 
+  # Assistant messages are markdown; term_ui wraps them by grapheme count, so
+  # a display-width pass re-splits anything that would overflow the terminal.
   defp message_rows(%{role: :assistant, text: body}, width, _expanded) do
-    rows(body, width, nil) ++ [{"", nil}]
+    markdown_rows(body, width) ++ [[{"", nil}]]
   end
 
   defp message_rows(%{role: :error, text: body}, width, _expanded) do
-    rows(body, width, @fail_style) ++ [{"", nil}]
+    rows(body, width, @fail_style) ++ [[{"", nil}]]
   end
 
   defp message_rows(%{role: :tool} = entry, width, expanded) do
     header_rows(entry, width) ++
       code_rows(entry.code, width, expanded) ++
-      result_rows(entry, width, expanded) ++ [{"", nil}]
+      result_rows(entry, width, expanded) ++ [[{"", nil}]]
+  end
+
+  defp markdown_rows(body, width) do
+    body
+    |> Markdown.render(width)
+    |> Enum.flat_map(&fit_spans(&1, width))
   end
 
   defp header_rows(%{done: false, name: name}, width) do
@@ -247,7 +309,7 @@ defmodule Epix.Tui do
   defp code_rows(code, width, expanded) do
     code
     |> capped(width - 4, if(expanded, do: :all, else: @code_cap))
-    |> Enum.map(&{"  │ " <> &1, @dim_style})
+    |> Enum.map(&[{"  │ " <> &1, @dim_style}])
   end
 
   # A running Lua tool may already carry a result via lua_result; show results
@@ -258,7 +320,7 @@ defmodule Epix.Tui do
   defp result_rows(%{result: result}, width, expanded) do
     result
     |> capped(width - 2, if(expanded, do: :all, else: @result_cap))
-    |> Enum.map(&{"  " <> &1, @dim_style})
+    |> Enum.map(&[{"  " <> &1, @dim_style}])
   end
 
   # --- chrome ---
@@ -275,8 +337,9 @@ defmodule Epix.Tui do
       |> Enum.reject(&is_nil/1)
       |> Enum.join(" · ")
 
-    gap = max(width - String.length(left) - String.length(right), 1)
-    {left <> String.duplicate(" ", gap) <> right, @bar_style}
+    gap = max(width - DisplayWidth.string_width(left) - DisplayWidth.string_width(right), 1)
+    {bar, _rest} = split_columns(left <> String.duplicate(" ", gap) <> right, width)
+    [{bar, @bar_style}]
   end
 
   defp status_label(:idle), do: "ready"
@@ -306,7 +369,7 @@ defmodule Epix.Tui do
   defp insert(state, text) do
     {before, aft} = split_input(state)
     input = Enum.join(before) <> text <> Enum.join(aft)
-    %{state | input: input, cursor: state.cursor + String.length(text)}
+    %{state | input: input, cursor: state.cursor + String.length(text), hist_idx: nil}
   end
 
   defp split_input(%{input: input, cursor: cursor}) do
@@ -322,7 +385,7 @@ defmodule Epix.Tui do
   defp clamp(value, low, high), do: value |> max(low) |> min(high)
 
   defp rows(body, width, style) do
-    body |> wrap(width) |> Enum.map(&{&1, style})
+    body |> wrap(width) |> Enum.map(&[{&1, style}])
   end
 
   defp capped(body, width, :all), do: wrap(body, width)
@@ -336,10 +399,57 @@ defmodule Epix.Tui do
     end
   end
 
-  # Word-wraps to the terminal width, splitting embedded newlines first. Each
-  # returned line is a single render row; the renderer does not wrap. Splitting
-  # and rejoining on single spaces preserves runs of spaces (code indentation);
-  # only words longer than the width are hard-broken.
+  # Re-splits a styled markdown line whose display width exceeds the terminal
+  # width (term_ui wraps by grapheme count, which under-counts CJK/emoji).
+  defp fit_spans([], _width), do: [[]]
+  defp fit_spans(spans, width), do: do_fit(spans, width, width, [], [])
+
+  defp do_fit([], _width, _rem, row, rows), do: Enum.reverse([Enum.reverse(row) | rows])
+
+  defp do_fit([{text, style} | rest], width, rem, row, rows) do
+    span_width = DisplayWidth.string_width(text)
+
+    if span_width <= rem do
+      do_fit(rest, width, rem - span_width, [{text, style} | row], rows)
+    else
+      case split_columns(text, rem) do
+        {"", _} when row == [] ->
+          # A single grapheme wider than the remaining full row: force it.
+          {first, tail} = String.split_at(text, 1)
+          do_fit([{tail, style} | rest], width, width, [], [[{first, style}] | rows])
+
+        {"", _} ->
+          do_fit([{text, style} | rest], width, width, [], [Enum.reverse(row) | rows])
+
+        {head, tail} ->
+          row = Enum.reverse([{head, style} | row])
+          do_fit([{tail, style} | rest], width, width, [], [row | rows])
+      end
+    end
+  end
+
+  # Splits a string so the head occupies at most `cols` display columns.
+  defp split_columns(text, cols) do
+    {head, tail, _used} =
+      text
+      |> String.graphemes()
+      |> Enum.reduce({[], [], 0}, fn g, {head, tail, used} ->
+        w = DisplayWidth.width(g)
+
+        if tail == [] and used + w <= cols do
+          {[g | head], tail, used + w}
+        else
+          {head, [g | tail], used}
+        end
+      end)
+
+    {head |> Enum.reverse() |> Enum.join(), tail |> Enum.reverse() |> Enum.join()}
+  end
+
+  # Word-wraps to the terminal's display columns, splitting embedded newlines
+  # first. Each returned line is a single render row; the renderer does not
+  # wrap. Splitting and rejoining on single spaces preserves runs of spaces
+  # (code indentation); only words wider than the row are hard-broken.
   defp wrap(body, width) when width < 1, do: wrap(body, 1)
 
   defp wrap(body, width) do
@@ -361,7 +471,7 @@ defmodule Epix.Tui do
   defp add_word([], word, _width), do: [word]
 
   defp add_word([row | rest], word, width) do
-    if String.length(row) + 1 + String.length(word) <= width do
+    if DisplayWidth.string_width(row) + 1 + DisplayWidth.string_width(word) <= width do
       [row <> " " <> word | rest]
     else
       [word, row | rest]
@@ -369,10 +479,18 @@ defmodule Epix.Tui do
   end
 
   defp break_word(word, width) do
-    if String.length(word) <= width do
+    if DisplayWidth.string_width(word) <= width do
       [word]
     else
-      word |> String.graphemes() |> Enum.chunk_every(width) |> Enum.map(&Enum.join/1)
+      case split_columns(word, width) do
+        {"", rest} ->
+          # First grapheme alone is wider than the row: force one through.
+          {first, tail} = String.split_at(word, 1)
+          [first | break_word(tail, width)]
+
+        {head, rest} ->
+          [head | break_word(rest, width)]
+      end
     end
   end
 end

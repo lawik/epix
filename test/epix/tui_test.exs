@@ -48,8 +48,12 @@ defmodule Epix.TuiTest do
     Tui.init(epix: [chat_app: app])
   end
 
-  defp texts(%RenderNode{type: :text, content: content}), do: [content]
-  defp texts(%RenderNode{children: children}), do: Enum.flat_map(children, &texts/1)
+  # The view is a vertical stack of rows; a row is a text node or a horizontal
+  # stack of styled spans. Flatten each row to its visible string.
+  defp texts(%RenderNode{type: :stack, children: rows}), do: Enum.map(rows, &row_text/1)
+
+  defp row_text(%RenderNode{type: :text, content: content}), do: content
+  defp row_text(%RenderNode{children: children}), do: Enum.map_join(children, "", &row_text/1)
 
   defp rendered(state), do: state |> Tui.view() |> texts() |> Enum.join("\n")
 
@@ -104,7 +108,9 @@ defmodule Epix.TuiTest do
       assert Tui.event_to_msg(%Event.Resize{width: 100, height: 40}, %{}) ==
                {:msg, {:resize, 100, 40}}
 
-      assert Tui.event_to_msg(%Event.Key{key: :up}, %{}) == :ignore
+      assert Tui.event_to_msg(%Event.Key{key: :up}, %{}) == {:msg, {:history, :prev}}
+      assert Tui.event_to_msg(%Event.Key{key: :down}, %{}) == {:msg, {:history, :next}}
+      assert Tui.event_to_msg(%Event.Key{key: :f1}, %{}) == :ignore
     end
   end
 
@@ -159,6 +165,45 @@ defmodule Epix.TuiTest do
       # The view emits exactly height rows: transcript + status + input.
       lines = state |> Tui.view() |> texts()
       assert length(lines) == 50
+    end
+
+    test "up and down arrows recall submitted history around the draft", %{state: state} do
+      state = type(state, "one")
+      {state, []} = Tui.update(:submit, state)
+      state = type(state, "two")
+      {state, []} = Tui.update(:submit, state)
+
+      state = type(state, "dra")
+
+      {state, []} = Tui.update({:history, :prev}, state)
+      assert %{input: "two", cursor: 3} = state
+
+      {state, []} = Tui.update({:history, :prev}, state)
+      assert state.input == "one"
+
+      # Clamped at the oldest entry.
+      {state, []} = Tui.update({:history, :prev}, state)
+      assert state.input == "one"
+
+      {state, []} = Tui.update({:history, :next}, state)
+      assert state.input == "two"
+
+      # Coming back down restores the stashed draft.
+      {state, []} = Tui.update({:history, :next}, state)
+      assert %{input: "dra", hist_idx: nil} = state
+
+      # Editing a recalled entry detaches from history browsing.
+      {state, []} = Tui.update({:history, :prev}, state)
+      state = type(state, "x")
+      assert %{input: "twox", hist_idx: nil} = state
+    end
+
+    test "submitting the same text twice keeps one history entry", %{state: state} do
+      state = type(state, "same")
+      {state, []} = Tui.update(:submit, state)
+      state = type(state, "same")
+      {state, []} = Tui.update(:submit, state)
+      assert state.history == ["same"]
     end
 
     test "blank submits are ignored; quit returns the quit command", %{state: state} do
@@ -250,6 +295,49 @@ defmodule Epix.TuiTest do
       assert length(lines) == 24
       assert length(Enum.filter(lines, &(&1 =~ "word"))) > 1
       assert List.last(lines) =~ "▌"
+    end
+
+    test "assistant messages render as markdown", %{state: state} do
+      body = """
+      # Title
+
+      Some **bold** text and a [link](https://example.com).
+
+      ```elixir
+      def hello, do: :ok
+      ```
+      """
+
+      chat = %{state.chat | messages: [%{role: :assistant, text: body}]}
+      out = rendered(%{state | chat: chat})
+
+      # Markup is consumed, content survives.
+      assert out =~ "Title"
+      refute out =~ "# Title"
+      assert out =~ "bold"
+      refute out =~ "**"
+      # The link keeps its URL visible for terminal auto-detection.
+      assert out =~ "link"
+      assert out =~ "https://example.com"
+      # Code fences keep their content (highlighted where a lexer exists).
+      assert out =~ "def hello"
+    end
+
+    test "wide characters wrap early instead of overflowing the row", %{state: state} do
+      {state, []} = Tui.update({:resize, 10, 24}, state)
+      body = String.duplicate("你好世界", 3)
+      chat = %{state.chat | messages: [%{role: :assistant, text: body}]}
+
+      lines = %{state | chat: chat} |> Tui.view() |> texts()
+
+      # Nothing is lost: every character is still present somewhere.
+      joined = Enum.join(lines, "")
+      for char <- String.graphemes(body), do: assert(joined =~ char)
+
+      # And no row is wider than the terminal in display columns.
+      for line <- lines do
+        assert TermUI.Renderer.DisplayWidth.string_width(line) <= 10
+      end
     end
 
     test "code indentation survives wrapping", %{state: state} do
