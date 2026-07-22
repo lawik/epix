@@ -6,7 +6,7 @@ defmodule Epix.Chat.ProjectionTest do
   setup do: %{state: Projection.new()}
 
   test "new/0 starts empty and idle" do
-    assert Projection.new() == %{messages: [], status: :idle, log: []}
+    assert Projection.new() == %{messages: [], status: :idle, log: [], tokens: 0, stream: nil}
   end
 
   test "user_prompt appends a user message, logs it, and marks thinking", %{state: state} do
@@ -32,40 +32,93 @@ defmodule Epix.Chat.ProjectionTest do
     assert state.messages == []
   end
 
+  test "response events accumulate tokens", %{state: state} do
+    state =
+      state
+      |> Projection.apply_event({:response, %{finish_reason: :tool_calls, ms: 10, tokens: 150}})
+      |> Projection.apply_event({:response, %{finish_reason: :stop, ms: 10, tokens: 42}})
+
+    assert state.tokens == 192
+  end
+
   test "assistant text appends a message and logs a reply", %{state: state} do
     state = Projection.apply_event(state, {:assistant, %{text: "hi there", tool_calls: []}})
     assert state.messages == [%{role: :assistant, text: "hi there"}]
     assert state.log == ["✎ reply"]
   end
 
-  test "empty assistant text with tool calls logs the wanted tools", %{state: state} do
-    event = {:assistant, %{text: "", tool_calls: [%{name: "lua_eval", args: "{}"}]}}
-    state = Projection.apply_event(state, event)
-    assert state.messages == [%{role: :activity, text: "→ lua_eval"}]
-    assert state.log == ["↻ wants tools: lua_eval"]
-  end
-
-  test "tool_start and tool_result both log; tool_result also adds a transcript line", %{
+  test "text deltas stream into one message; the assistant event is authoritative", %{
     state: state
   } do
     state =
       state
-      |> Projection.apply_event({:tool_start, %{name: "lua_eval"}})
-      |> Projection.apply_event({:tool_result, %{name: "lua_eval", body: "42\nignored"}})
+      |> Projection.apply_event({:text_delta, "hel"})
+      |> Projection.apply_event({:text_delta, "lo"})
 
-    assert state.messages == [%{role: :activity, text: "✓ lua_eval: 42"}]
+    assert [%{role: :assistant, text: "hello"}] = state.messages
+
+    # The full turn text replaces the accumulated deltas in place.
+    state = Projection.apply_event(state, {:assistant, %{text: "hello!", tool_calls: []}})
+    assert [%{role: :assistant, text: "hello!"}] = state.messages
+    assert state.stream == nil
+
+    # A later turn streams into a fresh message.
+    state = Projection.apply_event(state, {:text_delta, "next"})
+    assert [_, %{role: :assistant, text: "next"}] = state.messages
+  end
+
+  test "empty assistant text with tool calls logs the wanted tools", %{state: state} do
+    event = {:assistant, %{text: "", tool_calls: [%{name: "lua_eval", args: "{}"}]}}
+    state = Projection.apply_event(state, event)
+    assert state.messages == []
+    assert state.log == ["↻ wants tools: lua_eval"]
+  end
+
+  test "tool_start opens a tool entry; tool_result closes it in place", %{state: state} do
+    state = Projection.apply_event(state, {:tool_start, %{name: "lua_eval"}})
+    assert [%{role: :tool, name: "lua_eval", done: false, result: nil}] = state.messages
+
+    state = Projection.apply_event(state, {:tool_result, %{name: "lua_eval", body: "42\nrest"}})
+
+    assert [%{role: :tool, name: "lua_eval", done: true, result: "42\nrest", ok: true}] =
+             state.messages
+
     assert state.log == ["⚙ lua_eval…", "✓ lua_eval: 42"]
   end
 
-  test "lua_call logs the code's first line; lua_result is ignored", %{state: state} do
+  test "lua events attach code and verdict to the open tool entry", %{state: state} do
     state =
-      Projection.apply_event(state, {:lua_call, %{tool: "lua_eval", code: "return 2+2\nignored"}})
+      state
+      |> Projection.apply_event({:tool_start, %{name: "lua_eval"}})
+      |> Projection.apply_event({:lua_call, %{tool: "lua_eval", code: "return (\nrest"}})
+      |> Projection.apply_event(
+        {:lua_result, %{tool: "lua_eval", code: "return (", result: "ERROR: boom", ok: false}}
+      )
+      |> Projection.apply_event({:tool_result, %{name: "lua_eval", body: "ERROR: boom"}})
 
-    assert state.log == ["λ lua_eval: return 2+2"]
-    assert state.messages == []
+    assert [
+             %{
+               role: :tool,
+               name: "lua_eval",
+               code: "return (\nrest",
+               result: "ERROR: boom",
+               ok: false,
+               done: true
+             }
+           ] = state.messages
 
-    event = {:lua_result, %{tool: "lua_eval", code: "return 2+2", result: "4", ok: true}}
-    assert Projection.apply_event(state, event) == state
+    assert "λ lua_eval: return (" in state.log
+    assert "✗ lua_eval: ERROR: boom" in state.log
+  end
+
+  test "a failing body without a lua verdict is inferred from the ERROR prefix", %{state: state} do
+    state =
+      state
+      |> Projection.apply_event({:tool_start, %{name: "kv_get"}})
+      |> Projection.apply_event({:tool_result, %{name: "kv_get", body: "ERROR: no namespace"}})
+
+    assert [%{ok: false, done: true}] = state.messages
+    assert "✗ kv_get: ERROR: no namespace" in state.log
   end
 
   test "finish ok marks idle and logs done; finish error records an error", %{state: state} do
@@ -79,22 +132,37 @@ defmodule Epix.Chat.ProjectionTest do
     assert "✗ :timeout" in state.log
   end
 
+  test "compaction, cancellation and steering land in the log", %{state: state} do
+    state =
+      state
+      |> Projection.apply_event({:compaction, %{reason: :threshold, before: 9000, after: 1200}})
+      |> Projection.apply_event({:cancelled, %{step: 3}})
+      |> Projection.apply_event({:steering, %{count: 2}})
+      |> Projection.apply_event({:follow_up, %{count: 1}})
+
+    assert "⇆ compaction (threshold): 9000 → 1200 tok" in state.log
+    assert "✗ cancelled at step 3" in state.log
+    assert "↷ steering (2)" in state.log
+    assert "↪ follow-up (1)" in state.log
+    assert state.messages == []
+  end
+
   test "events without an explicit clause are ignored (state unchanged)", %{state: state} do
-    for event <- [
-          {:steering, %{count: 1}},
-          {:follow_up, %{count: 1}},
-          {:text_delta, "x"},
-          {:cancelled, %{step: 2}}
-        ] do
+    for event <- [{:reasoning_delta, "x"}, {:unknown_event, %{}}] do
       assert Projection.apply_event(state, event) == state
     end
   end
 
-  test "first_line truncates a long tool body to 80 chars in the transcript", %{state: state} do
+  test "the log truncates long bodies but the tool entry keeps the full result", %{state: state} do
     body = String.duplicate("x", 200)
-    state = Projection.apply_event(state, {:tool_result, %{name: "t", body: body}})
-    [%{role: :activity, text: text}] = state.messages
-    # "✓ t: " prefix + 80 sliced chars
-    assert text == "✓ t: " <> String.duplicate("x", 80)
+
+    state =
+      state
+      |> Projection.apply_event({:tool_start, %{name: "t"}})
+      |> Projection.apply_event({:tool_result, %{name: "t", body: body}})
+
+    assert [%{role: :tool, result: ^body}] = state.messages
+    # "✓ t: " prefix + 80 sliced chars in the log line
+    assert ("✓ t: " <> String.duplicate("x", 80)) in state.log
   end
 end

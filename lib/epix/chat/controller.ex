@@ -8,7 +8,7 @@ defmodule Epix.Chat.Controller do
   emitted events into exposed state via the pure `Epix.Chat.Projection`.
   """
 
-  use Solve.Controller, events: [:submit]
+  use Solve.Controller, events: [:submit, :cancel]
 
   alias Epix.Chat.Projection
   alias Epix.Session
@@ -21,7 +21,7 @@ defmodule Epix.Chat.Controller do
 
   @impl Solve.Controller
   def expose(state, _dependencies, _params) do
-    %{messages: state.messages, status: state.status, log: state.log}
+    %{messages: state.messages, status: state.status, log: state.log, tokens: state.tokens}
   end
 
   @doc "Handles a `:submit` event with `%{text: prompt}`."
@@ -36,6 +36,13 @@ defmodule Epix.Chat.Controller do
     end)
 
     Projection.user_prompt(state, text)
+  end
+
+  @doc "Handles a `:cancel` event by aborting the in-flight run, if any."
+  @spec cancel(map(), map()) :: map()
+  def cancel(_payload, %{session: session} = state) do
+    Session.cancel(session)
+    state
   end
 
   @spec handle_info(term(), map()) :: map()

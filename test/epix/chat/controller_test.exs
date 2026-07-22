@@ -21,7 +21,9 @@ defmodule Epix.Chat.ControllerTest do
   end
 
   defp start_app(model_fun) do
-    {:ok, app} = App.start_link(params: %{session_opts: [model_fun: model_fun, api_key: "test"]})
+    {:ok, app} =
+      App.start_link(name: nil, params: %{session_opts: [model_fun: model_fun, api_key: "test"]})
+
     app
   end
 
@@ -42,7 +44,9 @@ defmodule Epix.Chat.ControllerTest do
 
   test "subscribe returns the initial exposed state" do
     app = start_app(reply_model("hi"))
-    assert Solve.subscribe(app, :chat, self()) == %{messages: [], status: :idle, log: []}
+
+    assert Solve.subscribe(app, :chat, self()) ==
+             %{messages: [], status: :idle, log: [], tokens: 0}
   end
 
   test "a dispatched prompt runs the loop and exposes the transcript and stage log" do
